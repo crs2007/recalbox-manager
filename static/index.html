@@ -1,0 +1,1454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recalbox ROM Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-deep: #0a0e17;
+  --bg-card: #111827;
+  --bg-card-hover: #1a2234;
+  --bg-input: #0d1320;
+  --border: #1e2d44;
+  --border-hover: #2d4466;
+  --text: #e2e8f0;
+  --text-dim: #64748b;
+  --text-muted: #475569;
+  --accent: #38bdf8;
+  --accent-glow: rgba(56, 189, 248, 0.15);
+  --green: #34d399;
+  --green-dim: rgba(52, 211, 153, 0.15);
+  --red: #f87171;
+  --red-dim: rgba(248, 113, 113, 0.12);
+  --yellow: #fbbf24;
+  --yellow-dim: rgba(251, 191, 36, 0.12);
+  --orange: #fb923c;
+  --purple: #a78bfa;
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Outfit', sans-serif;
+  background: var(--bg-deep);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Background grid pattern */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.app { position: relative; z-index: 1; max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+/* ─── Header ─── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 24px 0; margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.header h1 {
+  font-size: 1.75rem; font-weight: 800;
+  background: linear-gradient(135deg, var(--accent), var(--purple));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  letter-spacing: -0.5px;
+}
+.header h1 span { font-size: 0.65em; font-weight: 400; opacity: 0.7; }
+.header-actions { display: flex; gap: 10px; align-items: center; }
+
+/* ─── Buttons ─── */
+.btn {
+  font-family: 'Outfit', sans-serif;
+  padding: 8px 18px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text); cursor: pointer; font-size: 0.85rem; font-weight: 500;
+  transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+.btn-primary {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb);
+  border-color: #3b82f6; color: #fff;
+}
+.btn-primary:hover { background: linear-gradient(135deg, #2563eb, #3b82f6); }
+.btn-danger { border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: var(--red-dim); }
+.btn-success { border-color: var(--green); color: var(--green); }
+.btn-success:hover { background: var(--green-dim); }
+.btn-sm { padding: 4px 10px; font-size: 0.78rem; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─── Config Bar ─── */
+.config-bar {
+  display: flex; gap: 10px; align-items: center;
+  padding: 14px 18px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 20px;
+}
+.config-bar input {
+  flex: 1; padding: 8px 12px; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+}
+.config-bar input:focus { outline: none; border-color: var(--accent); }
+.config-status {
+  font-size: 0.8rem; padding: 4px 10px; border-radius: 20px;
+  font-weight: 600;
+}
+.config-status.ok { background: var(--green-dim); color: var(--green); }
+.config-status.err { background: var(--red-dim); color: var(--red); }
+
+/* ─── Stats Grid ─── */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}
+.stat-card {
+  padding: 18px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  text-align: center;
+}
+.stat-card .stat-value {
+  font-size: 2rem; font-weight: 800;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent);
+}
+.stat-card .stat-label {
+  font-size: 0.75rem; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 1px; margin-top: 4px;
+}
+.stat-card.warning .stat-value { color: var(--yellow); }
+.stat-card.danger .stat-value { color: var(--red); }
+
+/* ─── Tabs ─── */
+.tabs {
+  display: flex; gap: 2px; margin-bottom: 20px;
+  border-bottom: 1px solid var(--border); padding-bottom: 0;
+}
+.tab {
+  padding: 10px 20px; cursor: pointer; font-size: 0.85rem; font-weight: 500;
+  color: var(--text-dim); border-bottom: 2px solid transparent;
+  transition: all 0.15s; background: none; border-top: none;
+  border-left: none; border-right: none; font-family: 'Outfit', sans-serif;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab .badge {
+  background: var(--red-dim); color: var(--red); font-size: 0.7rem;
+  padding: 1px 7px; border-radius: 10px; margin-left: 6px; font-weight: 700;
+}
+
+/* ─── Search ─── */
+.search-bar {
+  position: relative; margin-bottom: 16px;
+}
+.search-bar input {
+  width: 100%; padding: 10px 14px 10px 38px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text);
+  font-size: 0.9rem; font-family: 'Outfit', sans-serif;
+}
+.search-bar input:focus { outline: none; border-color: var(--accent); }
+.search-bar::before {
+  content: '⌕'; position: absolute; left: 12px; top: 50%;
+  transform: translateY(-50%); color: var(--text-dim); font-size: 1.1rem;
+}
+
+/* ─── Systems Grid ─── */
+.systems-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.system-card {
+  padding: 16px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  cursor: pointer; transition: all 0.15s;
+}
+.system-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); transform: translateY(-1px); }
+.system-card.has-issues { border-left: 3px solid var(--yellow); }
+.system-card .sys-name { font-weight: 600; font-size: 0.95rem; margin-bottom: 2px; }
+.system-card .sys-folder {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+  color: var(--text-dim); margin-bottom: 10px;
+}
+.system-card .sys-stats { display: flex; gap: 12px; font-size: 0.8rem; }
+.system-card .sys-stats span { display: flex; align-items: center; gap: 4px; }
+.sys-ok { color: var(--green); }
+.sys-warn { color: var(--yellow); }
+.sys-err { color: var(--red); }
+
+/* ─── ROM Table ─── */
+.rom-table-wrap {
+  overflow-x: auto; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; padding: 10px 14px; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.2);
+  position: sticky; top: 0;
+}
+td { padding: 8px 14px; border-bottom: 1px solid rgba(30,45,68,0.5); font-size: 0.85rem; }
+tr:hover td { background: rgba(56, 189, 248, 0.03); }
+.rom-name { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; word-break: break-all; }
+.rom-ext {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+  padding: 2px 6px; border-radius: 3px;
+  background: rgba(56, 189, 248, 0.1); color: var(--accent);
+}
+.rom-size { color: var(--text-dim); font-size: 0.8rem; white-space: nowrap; }
+.issue-badge {
+  font-size: 0.72rem; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+}
+.issue-badge.ok { background: var(--green-dim); color: var(--green); }
+.issue-badge.wrong { background: var(--yellow-dim); color: var(--yellow); }
+.issue-badge.unknown { background: var(--red-dim); color: var(--red); }
+
+/* ─── Issues Panel ─── */
+.issue-row {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); margin-bottom: 8px;
+}
+.issue-row .issue-icon { font-size: 1.3rem; flex-shrink: 0; }
+.issue-row .issue-details { flex: 1; }
+.issue-row .issue-file {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
+  font-weight: 600;
+}
+.issue-row .issue-desc { font-size: 0.78rem; color: var(--text-dim); margin-top: 2px; }
+.issue-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ─── Diagnostics ─── */
+.diag-badge {
+  font-size: 0.72rem; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  background: rgba(167, 139, 250, 0.15); color: var(--purple); cursor: pointer;
+}
+.diag-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-left: 3px solid var(--purple); border-radius: var(--radius-sm);
+  margin-bottom: 10px; overflow: hidden;
+}
+.diag-card-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; cursor: pointer;
+}
+.diag-card-header:hover { background: rgba(167,139,250,0.05); }
+.diag-card-header .diag-title { font-weight: 600; font-size: 0.88rem; color: var(--purple); }
+.diag-card-header .diag-file { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+.diag-card-header .diag-system { font-size: 0.75rem; color: var(--text-dim); margin-left: auto; white-space: nowrap; }
+.diag-card-body { padding: 12px 14px; border-top: 1px solid var(--border); background: rgba(0,0,0,0.15); }
+.diag-card-body p { font-size: 0.83rem; color: var(--text-dim); margin-bottom: 10px; }
+.diag-steps { list-style: decimal; padding-left: 18px; }
+.diag-steps li { font-size: 0.82rem; margin-bottom: 6px; line-height: 1.5; }
+.diag-steps li pre { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; background: var(--bg-input); padding: 6px 10px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; color: var(--accent); }
+.diag-search-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 0.8rem; color: var(--accent); text-decoration: none; }
+.diag-search-link:hover { text-decoration: underline; }
+.bios-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+.bios-table th { text-align: left; padding: 8px 12px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.2); }
+.bios-table td { padding: 8px 12px; border-bottom: 1px solid rgba(30,45,68,0.4); font-size: 0.83rem; }
+.bios-ok { color: var(--green); font-weight: 600; }
+.bios-missing { color: var(--red); font-weight: 600; }
+.bios-wrong { color: var(--yellow); font-weight: 600; }
+.bios-optional { color: var(--text-muted); }
+
+/* ─── Modal ─── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; backdrop-filter: blur(4px);
+}
+.modal {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 24px; min-width: 400px;
+  max-width: 90vw; max-height: 80vh; overflow-y: auto;
+}
+.modal h3 { margin-bottom: 16px; font-size: 1.1rem; }
+.modal select {
+  width: 100%; padding: 8px 12px; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-family: 'Outfit', sans-serif;
+  font-size: 0.9rem; margin-bottom: 16px;
+}
+.modal select:focus { outline: none; border-color: var(--accent); }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ─── Loading / Empty ─── */
+.loading { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+.loading .spinner {
+  width: 40px; height: 40px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin: 0 auto 16px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+.empty-state .emoji { font-size: 2.5rem; margin-bottom: 12px; }
+
+/* ─── Back nav ─── */
+.breadcrumb {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 16px; font-size: 0.85rem;
+}
+.breadcrumb a {
+  color: var(--accent); text-decoration: none; cursor: pointer;
+}
+.breadcrumb a:hover { text-decoration: underline; }
+.breadcrumb .sep { color: var(--text-muted); }
+
+/* ─── Pagination ─── */
+.pagination {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 16px 0;
+}
+.pagination .page-info { font-size: 0.8rem; color: var(--text-dim); }
+
+/* ─── Toast ─── */
+.toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; }
+.toast {
+  padding: 12px 18px; border-radius: var(--radius-sm);
+  margin-top: 8px; font-size: 0.85rem; font-weight: 500;
+  animation: slideIn 0.3s ease;
+  border: 1px solid;
+}
+.toast.success { background: var(--green-dim); color: var(--green); border-color: var(--green); }
+.toast.error { background: var(--red-dim); color: var(--red); border-color: var(--red); }
+.toast.info { background: var(--accent-glow); color: var(--accent); border-color: var(--accent); }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ─── Cover Lightbox ─── */
+.cover-lightbox {
+  display: flex; align-items: center; justify-content: center;
+  cursor: zoom-out;
+}
+.cover-lightbox img {
+  max-width: 90vw; max-height: 80vh; object-fit: contain;
+  border-radius: var(--radius); box-shadow: 0 0 40px rgba(0,0,0,0.8);
+}
+
+/* ─── Cover thumbnail in ROM table ─── */
+.cover-thumb {
+  width: 40px; height: 40px; object-fit: contain;
+  border-radius: 3px; cursor: pointer; display: block;
+  background: rgba(0,0,0,0.2);
+}
+.cover-missing {
+  width: 40px; height: 40px; display: flex; align-items: center;
+  justify-content: center; font-size: 1.2rem; color: var(--text-muted);
+  border: 1px dashed var(--border); border-radius: 3px;
+}
+
+/* ─── SS Config panel ─── */
+.ss-config-panel {
+  border-top: 1px solid var(--border); padding-top: 10px;
+  margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}
+.ss-config-panel input {
+  width: 160px; flex: none;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 768px) {
+  .header { flex-direction: column; gap: 12px; text-align: center; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .systems-grid { grid-template-columns: 1fr; }
+  .config-bar { flex-direction: column; }
+  .modal { min-width: auto; margin: 16px; }
+}
+
+/* ─── Footer ─── */
+.footer {
+  margin-top: 48px; padding: 20px 0 16px;
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
+  font-size: 0.78rem; color: var(--text-dim);
+}
+.footer a { color: var(--text-dim); text-decoration: none; transition: color 0.15s; }
+.footer a:hover { color: var(--accent); }
+.btn-star {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: var(--radius-sm);
+  border: 1px solid #30363d; background: #21262d;
+  color: #e6edf3; font-size: 0.8rem; font-weight: 500;
+  cursor: pointer; text-decoration: none;
+  transition: all 0.15s ease;
+}
+.btn-star:hover { background: #30363d; border-color: #8b949e; color: #e6edf3; }
+.btn-star svg { width: 14px; height: 14px; fill: #e3b341; }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+const API = window.location.origin + '/api';
+const state = {
+  config: { share_path: '\\\\RECALBOX\\share', accessible: false },
+  stats: null,
+  lastScan: null,
+  systems: {},
+  issues: [],
+  duplicates: [],
+  activeTab: 'systems',
+  selectedSystem: null,
+  searchQuery: '',
+  searchResults: [],
+  scanning: false,
+  loading: true,
+  modal: null,
+  toasts: [],
+  romPage: 0,
+  ROM_PAGE_SIZE: 100,
+  romFilter: '',
+  hideEmptySystems: true,
+  issueFilter: 'all',
+  diagnostics: [],
+  biosStatus: {},
+  diagFilter: 'all',
+  expandedDiag: {},
+  missingCovers: [],
+  coverScraping: {},
+  scrapeQueue: [],
+  scrapingBulk: false,
+  coverSystemFilter: 'all',
+  missingDescriptions: [],
+  descScraping: {},
+  descScrapeQueue: [],
+  descScrapingBulk: false,
+  descSystemFilter: 'all',
+  showSsConfig: false,
+  ssUser: '',
+  ssDevId: '',
+  ssConfigured: false,
+};
+
+// ─── API Helpers ─────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  try {
+    const r = await fetch(API + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    return await r.json();
+  } catch (e) {
+    toast('Connection error: ' + e.message, 'error');
+    return { error: e.message };
+  }
+}
+
+function toast(msg, type = 'info') {
+  const t = { msg, type, id: Date.now() };
+  state.toasts.push(t);
+  render();
+  setTimeout(() => {
+    state.toasts = state.toasts.filter(x => x.id !== t.id);
+    render();
+  }, 3500);
+}
+
+// ─── Actions ─────────────────────────────────────────────────────────────────
+async function init() {
+  const cfg = await api('/config');
+  if (!cfg.error) {
+    state.config = cfg;
+    state.ssUser = cfg.screenscraper_user || '';
+    state.ssDevId = cfg.screenscraper_devid || '';
+    state.ssConfigured = cfg.screenscraper_configured || false;
+  }
+  const st = await api('/status');
+  if (st.stats && st.stats.total_files !== undefined) { state.stats = st.stats; state.lastScan = st.last_scan; }
+  state.loading = false;
+  render();
+}
+
+async function updateConfig(sharePath) {
+  const r = await api('/config', { method: 'POST', body: { share_path: sharePath } });
+  if (!r.error) { state.config = r; toast('Path updated', 'success'); }
+  render();
+}
+
+async function startScan() {
+  state.scanning = true; render();
+  toast('Scanning ROMs... this may take a while for thousands of files', 'info');
+  const r = await api('/scan', { method: 'POST' });
+  state.scanning = false;
+  if (r.error) { toast(r.error, 'error'); render(); return; }
+  state.stats = r.stats; state.lastScan = r.last_scan;
+  const sys = await api('/systems');
+  if (!sys.error) state.systems = sys;
+  const iss = await api('/issues');
+  if (!iss.error) state.issues = iss;
+  const dups = await api('/duplicates');
+  if (!dups.error) state.duplicates = dups;
+  const diags = await api('/diagnostics');
+  if (!diags.error) state.diagnostics = diags;
+  const bios = await api('/bios');
+  if (!bios.error) state.biosStatus = bios;
+  const missing = await api('/covers/missing');
+  if (Array.isArray(missing)) state.missingCovers = missing;
+  const missingDescs = await api('/descriptions/missing');
+  if (Array.isArray(missingDescs)) state.missingDescriptions = missingDescs;
+  toast(`Scan complete! ${r.stats.total_files} files found`, 'success');
+  render();
+}
+
+async function loadSystem(name) {
+  const r = await api('/systems/' + name);
+  if (!r.error) {
+    state.selectedSystem = r;
+    state.romPage = 0;
+    state.romFilter = '';
+  }
+  render();
+}
+
+async function moveRom(filename, fromSystem, toSystem) {
+  const r = await api('/move', { method: 'POST', body: { filename, from_system: fromSystem, to_system: toSystem } });
+  if (r.ok) {
+    toast(`Moved ${filename} → ${toSystem}`, 'success');
+    if (state.selectedSystem) loadSystem(state.selectedSystem.folder);
+    state.modal = null;
+  } else {
+    toast(r.error || 'Move failed', 'error');
+  }
+  render();
+}
+
+async function deleteRom(filename, system) {
+  if (!confirm(`Move "${filename}" to trash?`)) return;
+  const r = await api('/delete', { method: 'POST', body: { filename, system } });
+  if (r.ok) {
+    toast(`Trashed ${filename}`, 'success');
+    if (state.selectedSystem) loadSystem(state.selectedSystem.folder);
+  } else {
+    toast(r.error || 'Delete failed', 'error');
+  }
+  render();
+}
+
+async function searchRoms(q) {
+  state.searchQuery = q;
+  if (q.length < 2) { state.searchResults = []; render(); return; }
+  const r = await api('/search?q=' + encodeURIComponent(q));
+  if (!r.error) state.searchResults = r;
+  render();
+}
+
+async function bulkFixMisplaced(system) {
+  if (!state.selectedSystem) return;
+  const misplaced = state.selectedSystem.roms.filter(r => r.issue === 'wrong_system' && r.suggested_systems?.length === 1);
+  if (!misplaced.length) { toast('No auto-fixable ROMs found', 'info'); return; }
+  if (!confirm(`Auto-move ${misplaced.length} ROMs to their suggested systems?`)) return;
+  const moves = misplaced.map(r => ({ filename: r.name, from_system: r.system, to_system: r.suggested_systems[0] }));
+  const r = await api('/bulk-move', { method: 'POST', body: { moves } });
+  if (r.results) {
+    const moved = r.results.filter(x => x.status === 'moved').length;
+    toast(`Moved ${moved}/${moves.length} ROMs`, 'success');
+    loadSystem(system);
+  }
+}
+
+async function fixAllZipContents() {
+  const items = state.diagnostics.filter(d => d.key === 'wrong_zip_contents' && d.suggested_systems && d.suggested_systems.length > 0);
+  if (!items.length) { toast('No wrong ZIP contents found', 'info'); return; }
+  const moves = items.map(d => ({ filename: d.file, from_system: d.system, to_system: d.suggested_systems[0] }));
+  const preview = moves.slice(0, 10).map(m => `${m.filename} → ${m.to_system}`).join('\n')
+    + (moves.length > 10 ? `\n...and ${moves.length - 10} more` : '');
+  if (!confirm(`Auto-move ${moves.length} ROM(s) to correct systems?\n\n${preview}`)) return;
+  const r = await api('/bulk-move', { method: 'POST', body: { moves } });
+  if (r.results) {
+    const moved = r.results.filter(x => x.status === 'moved').length;
+    const errors = r.results.filter(x => x.status === 'error').length;
+    toast(`Moved ${moved} ROM(s)${errors ? `, ${errors} error(s)` : ''}. Re-scan to update all stats.`, errors ? 'warning' : 'success');
+    // Refresh diagnostics and issues to reflect the moves
+    const diags = await api('/diagnostics');
+    if (!diags.error) state.diagnostics = diags;
+    const iss = await api('/issues');
+    if (!iss.error) state.issues = iss;
+    const sys = await api('/systems');
+    if (!sys.error) state.systems = sys;
+    render();
+  } else {
+    toast(r.error || 'Bulk move failed', 'error');
+  }
+}
+
+async function loadMissingCovers() {
+  const r = await api('/covers/missing');
+  if (Array.isArray(r)) state.missingCovers = r;
+  render();
+}
+
+async function scrapeCover(filename, system, gameName) {
+  const key = system + '/' + filename;
+  state.coverScraping[key] = true;
+  render();
+  const r = await api('/covers/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
+  delete state.coverScraping[key];
+  if (r.ok) {
+    toast('Cover saved for ' + filename, 'success');
+    // Reload system detail if open, and refresh missing covers list
+    if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
+    // Remove from missing covers list
+    state.missingCovers = state.missingCovers.filter(m => !(m.name === filename && m.system === system));
+  } else {
+    const msgs = {
+      no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
+      no_devid: 'ScreenScraper requires a developer ID — register at screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0 then add devid & devpass in the config bar',
+      not_found: 'No cover found for ' + filename,
+      rate_limited: 'ScreenScraper rate limit reached — try again later',
+      timeout: 'ScreenScraper timed out',
+      unsupported_system: 'This system is not supported by ScreenScraper',
+      ss_down: 'ScreenScraper error' + (r.detail ? ': ' + r.detail : ' — check your connection'),
+    };
+    toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+  }
+  render();
+}
+
+async function processScrapeQueue() {
+  if (!state.scrapeQueue.length) {
+    state.scrapingBulk = false;
+    toast('Bulk scrape complete', 'success');
+    render();
+    return;
+  }
+  state.scrapingBulk = true;
+  const { filename, system, gameName } = state.scrapeQueue.shift();
+  await scrapeCover(filename, system, gameName);
+  setTimeout(processScrapeQueue, 1200); // ~50/min — under ScreenScraper free tier limit
+}
+
+function startBulkScrape(roms) {
+  if (state.scrapingBulk) { toast('Bulk scrape already in progress', 'info'); return; }
+  state.scrapeQueue = roms.map(r => ({ filename: r.name, system: r.system, gameName: r.game_name || '' }));
+  processScrapeQueue();
+}
+
+async function loadMissingDescriptions() {
+  const r = await api('/descriptions/missing');
+  if (Array.isArray(r)) state.missingDescriptions = r;
+  render();
+}
+
+async function scrapeDescription(filename, system, gameName) {
+  const key = system + '/' + filename;
+  state.descScraping[key] = true;
+  render();
+  const r = await api('/descriptions/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
+  delete state.descScraping[key];
+  if (r.ok) {
+    toast('Description saved for ' + filename, 'success');
+    if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
+    state.missingDescriptions = state.missingDescriptions.filter(m => !(m.name === filename && m.system === system));
+  } else {
+    const msgs = {
+      no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
+      no_devid: 'ScreenScraper requires a developer ID — register at screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0 then add devid & devpass in the config bar',
+      not_found: 'No description found for ' + filename,
+      rate_limited: 'ScreenScraper rate limit reached — try again later',
+      timeout: 'ScreenScraper timed out',
+      unsupported_system: 'This system is not supported by ScreenScraper',
+      ss_down: 'ScreenScraper error' + (r.detail ? ': ' + r.detail : ' — check your connection'),
+    };
+    toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+  }
+  render();
+}
+
+async function processScrapeDescQueue() {
+  if (!state.descScrapeQueue.length) {
+    state.descScrapingBulk = false;
+    toast('Bulk description scrape complete', 'success');
+    render();
+    return;
+  }
+  state.descScrapingBulk = true;
+  const { filename, system, gameName } = state.descScrapeQueue.shift();
+  await scrapeDescription(filename, system, gameName);
+  setTimeout(processScrapeDescQueue, 1200);
+}
+
+function startBulkScrapeDescs(roms) {
+  if (state.descScrapingBulk) { toast('Bulk description scrape already in progress', 'info'); return; }
+  if (state.scrapingBulk) { toast('Cover scrape is in progress — wait for it to finish first', 'warning'); return; }
+  state.descScrapeQueue = roms.map(r => ({ filename: r.name, system: r.system, gameName: r.game_name || '' }));
+  processScrapeDescQueue();
+}
+
+async function saveSsCredentials() {
+  const user = document.getElementById('ssUser')?.value || '';
+  const pass = document.getElementById('ssPass')?.value || '';
+  const devid = document.getElementById('ssDevId')?.value || '';
+  const devpass = document.getElementById('ssDevPass')?.value || '';
+  const body = { screenscraper_user: user };
+  if (pass) body.screenscraper_pass = pass;
+  if (devid) body.screenscraper_devid = devid;
+  if (devpass) body.screenscraper_devpass = devpass;
+  const r = await api('/config', { method: 'POST', body });
+  if (r.ok) {
+    state.ssUser = user;
+    state.ssDevId = devid;
+    state.ssConfigured = r.screenscraper_configured;
+    toast('ScreenScraper credentials saved', 'success');
+  }
+  render();
+}
+
+function showCoverModal(url) {
+  state.modal = { type: 'cover', url };
+  render();
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────────
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    ${renderHeader()}
+    ${renderConfig()}
+    ${state.scanning ? renderLoading('Scanning your ROM collection...') : ''}
+    ${!state.scanning && state.stats ? renderStats() : ''}
+    ${!state.scanning && state.stats ? renderTabs() : ''}
+    ${!state.scanning && state.stats ? renderContent() : ''}
+    ${!state.stats && !state.scanning && !state.loading ? renderWelcome() : ''}
+    ${state.loading ? renderLoading('Connecting to server...') : ''}
+    ${state.modal ? renderModal() : ''}
+    ${renderToasts()}
+    ${renderFooter()}
+  `;
+  bindEvents();
+}
+
+function renderHeader() {
+  return `<div class="header">
+    <h1>⬡ Recalbox ROM Manager <span>v2026.04.0</span></h1>
+    <div class="header-actions">
+      ${state.lastScan ? `<span style="font-size:0.75rem;color:var(--text-dim)">Last scan: ${new Date(state.lastScan).toLocaleString()}</span>` : ''}
+      <button class="btn btn-primary" onclick="startScan()" ${state.scanning ? 'disabled' : ''}>
+        ${state.scanning ? '⟳ Scanning...' : '⟳ Scan ROMs'}
+      </button>
+    </div>
+  </div>`;
+}
+
+function renderConfig() {
+  const ok = state.config.accessible;
+  return `<div class="config-bar" style="flex-direction:column;align-items:stretch">
+    <div style="display:flex;gap:10px;align-items:center">
+      <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Share Path:</span>
+      <input type="text" id="sharePath" value="${escHtml(state.config.share_path || state.config.roms_root?.replace('\\\\roms','') || '')}"
+        placeholder="\\\\RECALBOX\\share" style="flex:1" />
+      <button class="btn btn-sm" onclick="updateConfig(document.getElementById('sharePath').value)">Update</button>
+      <span class="config-status ${ok ? 'ok' : 'err'}">${ok ? '● Connected' : '● Not found'}</span>
+      <button class="btn btn-sm" onclick="state.showSsConfig=!state.showSsConfig;render()" style="white-space:nowrap">
+        🖼 ScreenScraper ${state.ssConfigured ? '<span style="color:var(--green)">●</span>' : '<span style="color:var(--text-muted)">○</span>'}
+      </button>
+    </div>
+    ${state.showSsConfig ? `<div class="ss-config-panel">
+      <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Username:</span>
+      <input type="text" id="ssUser" value="${escHtml(state.ssUser)}" placeholder="your screenscraper.fr username" />
+      <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Password:</span>
+      <input type="password" id="ssPass" placeholder="your password" />
+      <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Dev ID:</span>
+      <input type="text" id="ssDevId" value="${escHtml(state.ssDevId||'')}" placeholder="developer ID" />
+      <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Dev Pass:</span>
+      <input type="password" id="ssDevPass" placeholder="developer password" />
+      <button class="btn btn-sm btn-primary" onclick="saveSsCredentials()">Save</button>
+      <span style="font-size:0.75rem;color:var(--text-dim)">
+        Need a dev ID? Register at
+        <a href="https://www.screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0" target="_blank" rel="noopener" style="color:var(--accent)">screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0</a>
+      </span>
+    </div>` : ''}
+  </div>`;
+}
+
+function renderStats() {
+  const s = state.stats;
+  return `<div class="stats-grid">
+    <div class="stat-card"><div class="stat-value">${s.total_systems}</div><div class="stat-label">Systems</div></div>
+    <div class="stat-card"><div class="stat-value">${s.total_files.toLocaleString()}</div><div class="stat-label">Total ROMs</div></div>
+    <div class="stat-card"><div class="stat-value">${s.total_size}</div><div class="stat-label">Total Size</div></div>
+    <div class="stat-card ${s.total_misplaced > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_misplaced}</div><div class="stat-label">Misplaced</div></div>
+    <div class="stat-card ${s.total_duplicates > 0 ? 'danger' : ''}"><div class="stat-value">${s.total_duplicates}</div><div class="stat-label">Duplicates</div></div>
+    <div class="stat-card ${s.total_issues > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_issues}</div><div class="stat-label">Total Issues</div></div>
+    <div class="stat-card ${(s.total_diagnostics||0) > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_diagnostics||0}</div><div class="stat-label">Diagnostics</div></div>
+    <div class="stat-card" style="border-color:var(--green)"><div class="stat-value" style="color:var(--green)">${(s.total_with_covers||0).toLocaleString()}</div><div class="stat-label">With Covers</div></div>
+    <div class="stat-card ${(s.total_missing_covers||0) > 0 ? 'warning' : ''}"><div class="stat-value">${(s.total_missing_covers||0).toLocaleString()}</div><div class="stat-label">Missing Covers</div></div>
+    <div class="stat-card" style="border-color:var(--cyan)"><div class="stat-value" style="color:var(--cyan)">${(s.total_with_descriptions||0).toLocaleString()}</div><div class="stat-label">With Descriptions</div></div>
+    <div class="stat-card ${(s.total_missing_descriptions||0) > 0 ? 'warning' : ''}"><div class="stat-value">${(s.total_missing_descriptions||0).toLocaleString()}</div><div class="stat-label">Missing Descriptions</div></div>
+  </div>`;
+}
+
+function renderTabs() {
+  const tabs = [
+    { id: 'systems', label: 'Systems' },
+    { id: 'issues', label: 'Issues', badge: state.issues.filter(i => i.type === 'misplaced').length },
+    { id: 'duplicates', label: 'Duplicates', badge: state.duplicates.length },
+    { id: 'diagnostics', label: 'Diagnostics', badge: state.diagnostics.length },
+    { id: 'covers', label: 'Missing Covers', badge: state.missingCovers.length },
+    { id: 'descriptions', label: 'Missing Descriptions', badge: state.missingDescriptions.length },
+    { id: 'search', label: 'Search' },
+  ];
+  return `<div class="tabs">
+    ${tabs.map(t => `
+      <button class="tab ${state.activeTab === t.id ? 'active' : ''}" data-tab="${t.id}">
+        ${t.label}${t.badge ? `<span class="badge">${t.badge}</span>` : ''}
+      </button>
+    `).join('')}
+  </div>`;
+}
+
+function renderContent() {
+  if (state.selectedSystem) return renderSystemDetail();
+  switch (state.activeTab) {
+    case 'systems': return renderSystems();
+    case 'issues': return renderIssues();
+    case 'duplicates': return renderDuplicates();
+    case 'diagnostics': return renderDiagnostics();
+    case 'covers': return renderMissingCovers();
+    case 'descriptions': return renderMissingDescriptions();
+    case 'search': return renderSearch();
+    default: return '';
+  }
+}
+
+function renderSystems() {
+  let entries = Object.entries(state.systems).sort((a, b) => b[1].total_roms - a[1].total_roms);
+  if (!entries.length) return '<div class="empty-state"><div class="emoji">📂</div><p>No systems found. Click "Scan ROMs" to get started.</p></div>';
+  const totalCount = entries.length;
+  if (state.hideEmptySystems) entries = entries.filter(([, s]) => s.total_roms > 0);
+  const hiddenCount = totalCount - entries.length;
+  return `
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.85rem;color:var(--text-muted);user-select:none">
+      <input type="checkbox" id="hideEmptyToggle" ${state.hideEmptySystems ? 'checked' : ''}
+        style="accent-color:var(--cyan);width:15px;height:15px;cursor:pointer" />
+      Hide empty systems
+    </label>
+    ${hiddenCount > 0 ? `<span style="font-size:0.78rem;color:var(--text-dim)">(${hiddenCount} hidden)</span>` : ''}
+    <span style="margin-left:auto;font-size:0.78rem;color:var(--text-dim)">${entries.length} of ${totalCount} systems</span>
+  </div>
+  <div class="systems-grid">
+    ${entries.map(([key, s]) => `
+      <div class="system-card ${s.misplaced_count > 0 ? 'has-issues' : ''}" data-system="${key}">
+        <div class="sys-name">${escHtml(s.name)}</div>
+        <div class="sys-folder">/${escHtml(s.folder)}</div>
+        <div class="sys-stats">
+          <span class="sys-ok">✓ ${s.ok_count}</span>
+          ${s.misplaced_count ? `<span class="sys-warn">⚠ ${s.misplaced_count}</span>` : ''}
+          ${s.unknown_count ? `<span class="sys-err">? ${s.unknown_count}</span>` : ''}
+          ${s.diagnostic_count ? `<span style="color:var(--purple)">⚕ ${s.diagnostic_count}</span>` : ''}
+          <span style="color:var(--text-muted)">${s.total_roms} total</span>
+          <span style="color:var(--green)">🖼 ${s.cover_count||0}/${s.total_roms}</span>
+          <span style="color:var(--cyan)">📝 ${s.description_count||0}/${s.total_roms}</span>
+        </div>
+      </div>
+    `).join('')}
+  </div>`;
+}
+
+function renderSystemDetail() {
+  const s = state.selectedSystem;
+  let roms = s.roms || [];
+  if (state.romFilter) {
+    const q = state.romFilter.toLowerCase();
+    roms = roms.filter(r => r.name.toLowerCase().includes(q));
+  }
+  // Sort: issues first, then alphabetical
+  roms.sort((a, b) => {
+    if (a.issue && !b.issue) return -1;
+    if (!a.issue && b.issue) return 1;
+    return a.name.localeCompare(b.name);
+  });
+  const totalPages = Math.ceil(roms.length / state.ROM_PAGE_SIZE);
+  const page = Math.min(state.romPage, totalPages - 1);
+  const pageRoms = roms.slice(page * state.ROM_PAGE_SIZE, (page + 1) * state.ROM_PAGE_SIZE);
+
+  return `
+    <div class="breadcrumb">
+      <a onclick="state.selectedSystem=null;render()">← Systems</a>
+      <span class="sep">/</span>
+      <span>${escHtml(s.name)}</span>
+      <span style="color:var(--text-muted);font-size:0.8rem;margin-left:auto">${roms.length} ROMs</span>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="romFilter" placeholder="Filter ROMs..." value="${escHtml(state.romFilter)}"
+        style="flex:1;min-width:200px;padding:8px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem" />
+      ${s.misplaced_count > 0 ? `<button class="btn btn-success btn-sm" onclick="bulkFixMisplaced('${s.folder}')">⚡ Auto-fix ${s.misplaced_count} misplaced</button>` : ''}
+      <span style="font-size:0.75rem;color:var(--text-dim)">
+        Valid: ${s.valid_extensions?.join(', ') || 'any'}
+      </span>
+    </div>
+    <div class="rom-table-wrap" style="max-height:65vh;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th style="width:52px">Cover</th><th>File Name</th><th>Ext</th><th>Size</th><th>Status</th><th>Desc</th><th>Actions</th>
+        </tr></thead>
+        <tbody>
+          ${pageRoms.map(r => {
+            const scrapeKey = s.folder + '/' + r.name;
+            const isScraping = !!state.coverScraping[scrapeKey];
+            const isDescScraping = !!state.descScraping[scrapeKey];
+            const isRomFile = !r.issue;
+            const coverCell = isRomFile
+              ? (r.has_cover
+                  ? `<img class="cover-thumb" src="${escHtml(r.cover_url)}" loading="lazy" onclick="showCoverModal('${escJs(r.cover_url)}')" title="${escHtml(r.game_name || r.name)}">`
+                  : `<div class="cover-missing" title="No cover art">📷</div>`)
+              : `<div style="width:36px;height:36px"></div>`;
+            const descCell = isRomFile
+              ? (r.has_description
+                  ? `<span title="Has description" style="color:var(--green);font-size:0.9rem">📝✓</span>`
+                  : `<button class="btn btn-sm" onclick="scrapeDescription('${escJs(r.name)}','${escJs(s.folder)}','${escJs(r.game_name||'')}')"
+                      ${isDescScraping ? 'disabled' : ''} title="Fetch description from ScreenScraper">
+                      ${isDescScraping ? '⟳' : '📝'}
+                    </button>`)
+              : '';
+            return `<tr>
+              <td style="padding:4px 8px">${coverCell}</td>
+              <td class="rom-name">${escHtml(r.game_name || r.name)}<br><span style="color:var(--text-muted);font-size:0.72rem">${r.game_name ? escHtml(r.name) : ''}</span></td>
+              <td><span class="rom-ext">${escHtml(r.ext)}</span></td>
+              <td class="rom-size">${r.size_human}</td>
+              <td>
+                ${r.issue === 'wrong_system' ? `<span class="issue-badge wrong">⚠ Wrong folder</span>` :
+                  r.issue === 'unknown_system' ? `<span class="issue-badge unknown">? Unknown</span>` :
+                  `<span class="issue-badge ok">✓ OK</span>`}
+                ${(r.diagnostics||[]).map(d => `<span class="diag-badge" title="${escHtml(diagTitle(d))}">⚕ ${escHtml(diagTitle(d))}</span>`).join(' ')}
+              </td>
+              <td style="text-align:center">${descCell}</td>
+              <td>
+                ${r.suggested_systems?.length ? `<button class="btn btn-sm btn-success" onclick='showMoveModal(${JSON.stringify(r).replace(/'/g,"&#39;")})'>Move →</button>` : ''}
+                ${isRomFile ? `<button class="btn btn-sm" onclick="scrapeCover('${escJs(r.name)}','${escJs(s.folder)}','${escJs(r.game_name||'')}')"
+                  ${isScraping ? 'disabled' : ''} title="${r.has_cover ? 'Re-scrape cover' : 'Fetch cover art'}">
+                  ${isScraping ? '⟳' : '🖼'}
+                </button>` : ''}
+                <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${s.folder}')">🗑</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${totalPages > 1 ? `<div class="pagination">
+      <button class="btn btn-sm" onclick="state.romPage=Math.max(0,state.romPage-1);render()" ${page===0?'disabled':''}>← Prev</button>
+      <span class="page-info">Page ${page+1} of ${totalPages}</span>
+      <button class="btn btn-sm" onclick="state.romPage=Math.min(${totalPages-1},state.romPage+1);render()" ${page>=totalPages-1?'disabled':''}>Next →</button>
+    </div>` : ''}
+  `;
+}
+
+function renderIssues() {
+  const filters = ['all', 'misplaced', 'duplicate', 'unknown_system', 'permission_error'];
+  let issues = state.issues;
+  if (state.issueFilter !== 'all') issues = issues.filter(i => i.type === state.issueFilter);
+
+  return `
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+      ${filters.map(f => `<button class="btn btn-sm ${state.issueFilter===f?'btn-primary':''}" 
+        onclick="state.issueFilter='${f}';render()">${f === 'all' ? 'All' : f.replace('_',' ')}</button>`).join('')}
+    </div>
+    ${issues.length === 0 ? '<div class="empty-state"><div class="emoji">✨</div><p>No issues found!</p></div>' : ''}
+    ${issues.slice(0, 200).map(i => {
+      if (i.type === 'misplaced') return `
+        <div class="issue-row">
+          <div class="issue-icon">⚠️</div>
+          <div class="issue-details">
+            <div class="issue-file">${escHtml(i.file)}</div>
+            <div class="issue-desc">In <strong>${escHtml(i.current_system)}</strong> — extension <code>${escHtml(i.ext)}</code> belongs in: ${i.suggested_systems.map(s => `<strong>${escHtml(s)}</strong>`).join(', ')}</div>
+          </div>
+          <div class="issue-actions">
+            ${i.suggested_systems.length === 1
+              ? `<button class="btn btn-sm btn-success" onclick="moveRom('${escJs(i.file)}','${escJs(i.current_system)}','${escJs(i.suggested_systems[0])}')">Move → ${escHtml(i.suggested_systems[0])}</button>`
+              : `<button class="btn btn-sm" onclick='showMoveModal(${JSON.stringify({name:i.file,system:i.current_system,suggested_systems:i.suggested_systems}).replace(/\x27/g,"&#39;")})'>Choose system…</button>`}
+            <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(i.file)}','${escJs(i.current_system)}')" title="Move to trash">🗑</button>
+          </div>
+        </div>`;
+      if (i.type === 'unknown_system') return `
+        <div class="issue-row">
+          <div class="issue-icon">❓</div>
+          <div class="issue-details">
+            <div class="issue-file">${escHtml(i.file)}</div>
+            <div class="issue-desc">In <strong>${escHtml(i.current_system)}</strong> — extension <code>${escHtml(i.ext)}</code> is not recognised for any known system. This may be a non-ROM file (config, metadata, etc.).</div>
+          </div>
+          <div class="issue-actions">
+            <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(i.file)}','${escJs(i.current_system)}')" title="Move to trash">🗑 Trash</button>
+          </div>
+        </div>`;
+      if (i.type === 'duplicate') return `
+        <div class="issue-row">
+          <div class="issue-icon">📋</div>
+          <div class="issue-details">
+            <div class="issue-file">Duplicate — ${i.copies.length} copies</div>
+            <div class="issue-desc">${i.copies.map(c => `<strong>${escHtml(c.system)}</strong>/${escHtml(c.file)}`).join(' ⟷ ')}</div>
+          </div>
+          <div class="issue-actions">
+            ${i.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(c.file)}','${escJs(c.system)}')" title="Keep first copy, trash this one">🗑 ${escHtml(c.system)}</button>`).join('')}
+          </div>
+        </div>`;
+      if (i.type === 'permission_error') return `
+        <div class="issue-row">
+          <div class="issue-icon">🔒</div>
+          <div class="issue-details">
+            <div class="issue-file">Permission denied — <strong>${escHtml(i.system)}</strong></div>
+            <div class="issue-desc">Could not read this folder over the network share. Check that the SMB share is accessible and you have read permissions on <code>\\\\RECALBOX\\share\\roms\\${escHtml(i.system)}</code>.</div>
+          </div>
+        </div>`;
+      return `<div class="issue-row">
+        <div class="issue-icon">❓</div>
+        <div class="issue-details"><div class="issue-desc">${escHtml(JSON.stringify(i))}</div></div>
+      </div>`;
+    }).join('')}
+    ${issues.length > 200 ? `<p style="text-align:center;color:var(--text-dim);padding:12px">Showing 200 of ${issues.length} issues</p>` : ''}
+  `;
+}
+
+function renderDuplicates() {
+  if (!state.duplicates.length) return '<div class="empty-state"><div class="emoji">👍</div><p>No duplicates found!</p></div>';
+  return state.duplicates.map(d => `
+    <div class="issue-row">
+      <div class="issue-icon">📋</div>
+      <div class="issue-details">
+        <div class="issue-file">${d.copies.length} copies</div>
+        <div class="issue-desc">
+          ${d.copies.map(c => `<span style="margin-right:12px"><strong>${c.system}</strong>/${escHtml(c.file)} <span class="rom-size">(${c.size_human})</span></span>`).join('')}
+        </div>
+      </div>
+      <div class="issue-actions">
+        ${d.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(c.file)}','${c.system}')">🗑 ${c.system}</button>`).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+const DIAG_SOLUTIONS = {
+  missing_cue: {
+    title: 'Missing CUE file',
+    description: 'CD-ROM games need a .cue file describing the disc track layout. Without it the emulator cannot read the disc.',
+    steps: [
+      'Create a text file named exactly like the .bin but with .cue extension (same folder).',
+      'Minimal single-track content:\n  FILE "<game>.bin" BINARY\n    TRACK 01 MODE2/2352\n      INDEX 01 00:00:00',
+      'For multi-track games (audio CD) you need one TRACK line per track. Download matching .cue from redump.org or use a CUE generator.',
+    ],
+    search_query: 'create cue file for bin recalbox',
+  },
+  missing_m3u: {
+    title: 'Multi-disc game needs .m3u playlist',
+    description: 'Games on multiple discs require an .m3u playlist so the emulator knows the disc order.',
+    steps: [
+      'Create a plain-text file named after the game with .m3u extension in the same system folder.',
+      'Each line = one disc filename (e.g. "Game (Disc 1).cue"). Use Unix line endings (LF).',
+      'Recalbox will only show the .m3u in the game list — individual disc files are hidden.',
+    ],
+    search_query: 'recalbox m3u multi disc playlist setup',
+  },
+  broken_m3u: {
+    title: 'M3U playlist references missing file(s)',
+    description: 'The .m3u playlist lists disc files that do not exist in the same folder.',
+    steps: [
+      'Open the .m3u file in a text editor and check each line.',
+      'Ensure every referenced disc file (.cue, .chd, .bin) is present in the same folder.',
+      'Fix typos, wrong paths, or Windows vs Unix path separator issues (use plain filenames, no folder prefix).',
+    ],
+    search_query: 'recalbox m3u playlist broken missing disc',
+  },
+  empty_file: {
+    title: 'File is empty or too small',
+    description: 'The ROM file is 0 bytes or smaller than a valid ROM could ever be — likely a corrupt or incomplete download.',
+    steps: [
+      'Delete the file and re-download from a reliable source.',
+      'Check disk space on the Recalbox share — a full disk can cause zero-byte files.',
+    ],
+    search_query: 'rom empty file corrupt download fix',
+  },
+  likely_overdump: {
+    title: 'ROM appears to be an overdump',
+    description: 'The file ends with a large block of 0xFF or 0x00 bytes — the hallmark of a bad dump with padding.',
+    steps: [
+      'The ROM may still work — some emulators handle overdumps gracefully.',
+      'If it does not load, find a "No-Intro" verified clean dump of the same game.',
+      'You can trim padding with a hex editor, but a clean re-download is safer.',
+    ],
+    search_query: 'rom overdump bad dump fix no-intro',
+  },
+  corrupt_archive: {
+    title: 'ZIP archive is corrupt or unreadable',
+    description: 'The archive fails integrity checks. The emulator cannot extract and load the ROM.',
+    steps: [
+      'Try extracting the archive on your PC to confirm it is readable.',
+      'Re-download the ROM from a reliable source.',
+      'Check if this system supports .7z — some cores require .zip only.',
+    ],
+    search_query: 'recalbox corrupt zip rom fix',
+  },
+  wrong_zip_contents: {
+    title: 'ZIP contains files for wrong system',
+    description: "The archive is valid and .zip/.7z is accepted here, but the files inside belong to a different system. The emulator opens the archive and finds nothing it can use.",
+    steps: [
+      'Open the archive on your PC and check what files are inside.',
+      "If the inner files belong to a different system, move this archive to that system's folder.",
+      'MAME/arcade ROM zips belong in roms/mame or roms/fbneo — not in a console folder.',
+      'If the inner files match no known system, this may be a mislabelled download.',
+    ],
+    search_query: 'recalbox rom wrong system zip contents',
+  },
+};
+
+function diagTitle(key) {
+  return (DIAG_SOLUTIONS[key] || {}).title || key;
+}
+
+function renderDiagnostics() {
+  const diagTypes = ['all', 'missing_cue', 'missing_m3u', 'broken_m3u', 'empty_file', 'likely_overdump', 'corrupt_archive', 'wrong_zip_contents'];
+  let diags = state.diagnostics;
+  if (state.diagFilter !== 'all') diags = diags.filter(d => d.key === state.diagFilter);
+
+  // BIOS status panel
+  const biosEntries = Object.entries(state.biosStatus);
+  const biosPanel = biosEntries.length ? `
+    <div style="margin-bottom:24px">
+      <h3 style="font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:12px">⚙ BIOS Status</h3>
+      <div class="rom-table-wrap">
+        <table class="bios-table">
+          <thead><tr><th>System</th><th>File</th><th>Status</th><th>Description</th></tr></thead>
+          <tbody>
+            ${biosEntries.flatMap(([sys, info]) =>
+              info.bios_files.map(f => `<tr>
+                <td style="color:var(--purple)">${escHtml(info.display_name)}</td>
+                <td class="rom-name">${escHtml(f.file)}</td>
+                <td>${
+                  f.status === 'ok' ? `<span class="bios-ok">✓ Present</span>` :
+                  f.status === 'missing' && f.required ? `<span class="bios-missing">✗ Missing</span>` :
+                  f.status === 'missing' ? `<span class="bios-optional">– Optional</span>` :
+                  f.status === 'wrong_version' ? `<span class="bios-wrong">⚠ Wrong version</span>` :
+                  `<span class="bios-optional">${escHtml(f.status)}</span>`
+                }</td>
+                <td style="color:var(--text-dim);font-size:0.8rem">${escHtml(f.desc)}${f.expected_md5 ? `<br><span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:var(--text-muted)">MD5: ${f.expected_md5}</span>` : ''}</td>
+              </tr>`)
+            ).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ` : '';
+
+  // Diag filter bar
+  const wrongZipCount = state.diagnostics.filter(d => d.key === 'wrong_zip_contents').length;
+  const filterBar = `
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:0.8rem;color:var(--text-dim)">Filter:</span>
+      ${diagTypes.map(f => `<button class="btn btn-sm ${state.diagFilter===f?'btn-primary':''}" onclick="state.diagFilter='${f}';render()">
+        ${f === 'all' ? `All (${state.diagnostics.length})` : escHtml(diagTitle(f))}
+      </button>`).join('')}
+      ${wrongZipCount > 0 ? `<button class="btn btn-sm btn-success" style="margin-left:auto" onclick="fixAllZipContents()">⚡ Fix All Wrong ZIPs (${wrongZipCount})</button>` : ''}
+    </div>
+  `;
+
+  if (!diags.length && !biosEntries.length) {
+    return `<div class="empty-state"><div class="emoji">🩺</div><p>No diagnostic issues found. Run a scan first.</p></div>`;
+  }
+
+  const diagCards = diags.length ? diags.map((d, idx) => {
+    const sol = DIAG_SOLUTIONS[d.key] || {};
+    const isOpen = !!state.expandedDiag[idx];
+    const gameName = d.file ? d.file.replace(/\.[^.]+$/, '') : '';
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent((sol.search_query||d.key)+' '+escHtml(gameName))}`;
+    return `
+      <div class="diag-card">
+        <div class="diag-card-header" onclick="state.expandedDiag[${idx}]=!state.expandedDiag[${idx}];render()">
+          <span style="font-size:1.1rem">⚕</span>
+          <span class="diag-title">${escHtml(sol.title||d.key)}</span>
+          <span class="diag-file">${escHtml(d.file||'')}</span>
+          <span class="diag-system">${escHtml(d.system||'')}</span>
+          <span style="color:var(--text-muted);margin-left:8px">${isOpen?'▲':'▼'}</span>
+        </div>
+        ${isOpen ? `<div class="diag-card-body">
+          <p>${escHtml(sol.description||d.description||'')}</p>
+          ${sol.steps ? `<ol class="diag-steps">${sol.steps.map(s => `<li>${s.includes('\n') ? escHtml(s.split('\n')[0]) + '<pre>' + escHtml(s.split('\n').slice(1).join('\n')) + '</pre>' : escHtml(s)}</li>`).join('')}</ol>` : ''}
+          ${d.related_files ? `<p style="margin-top:8px;font-size:0.8rem;color:var(--text-dim)">Related files: ${d.related_files.map(f=>escHtml(f)).join(', ')}</p>` : ''}
+          ${d.missing_refs ? `<p style="margin-top:8px;font-size:0.8rem;color:var(--red)">Missing: ${d.missing_refs.map(f=>escHtml(f)).join(', ')}</p>` : ''}
+          ${d.key === 'wrong_zip_contents' ? `
+            <p style="margin-top:10px;font-size:0.82rem;color:var(--text-dim)">Found inside: ${(d.inner_extensions||[]).map(e=>`<code>${escHtml(e)}</code>`).join(', ')}</p>
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+              ${(d.suggested_systems||[]).map(sys=>`<button class="btn btn-sm btn-success" onclick="moveRom('${escHtml(d.file)}','${escHtml(d.system)}','${escHtml(sys)}')">Move → ${escHtml(sys)}</button>`).join('')}
+            </div>
+          ` : ''}
+          <a class="diag-search-link" href="${searchUrl}" target="_blank" rel="noopener">🔍 Search for solution online →</a>
+        </div>` : ''}
+      </div>
+    `;
+  }).join('') : '<div class="empty-state" style="padding:30px"><p>No issues matching this filter.</p></div>';
+
+  return biosPanel + filterBar + diagCards;
+}
+
+function renderMissingCovers() {
+  const allSystems = [...new Set(state.missingCovers.map(r => r.system))].sort();
+  let roms = state.missingCovers;
+  if (state.coverSystemFilter !== 'all') roms = roms.filter(r => r.system === state.coverSystemFilter);
+
+  const systemSelect = `<select onchange="state.coverSystemFilter=this.value;render()" style="padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem">
+    <option value="all">All Systems (${state.missingCovers.length})</option>
+    ${allSystems.map(s => `<option value="${s}" ${state.coverSystemFilter===s?'selected':''}>${escHtml(s)} (${state.missingCovers.filter(r=>r.system===s).length})</option>`).join('')}
+  </select>`;
+
+  // Store filtered roms in state so the button doesn't embed huge JSON in the HTML
+  state._pendingBulkRoms = roms;
+  const bulkBtn = roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrape(state._pendingBulkRoms)" ${state.scrapingBulk ? 'disabled' : ''}>
+    ${state.scrapingBulk ? `⟳ Scraping (${state.scrapeQueue.length} left)...` : `🖼 Scrape All Missing (${roms.length})`}
+  </button>` : '';
+
+  const refreshBtn = `<button class="btn btn-sm" onclick="loadMissingCovers()">↻ Refresh</button>`;
+
+  if (!state.missingCovers.length && !state.lastScan) {
+    return `<div class="empty-state"><div class="emoji">📷</div><p>Run a scan first to detect missing covers.</p></div>`;
+  }
+  if (!roms.length) {
+    return `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+        ${systemSelect}${refreshBtn}
+      </div>
+      <div class="empty-state"><div class="emoji">🎉</div><p>All ROMs have cover images!</p></div>`;
+  }
+
+  return `
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+      ${systemSelect}
+      ${bulkBtn}
+      ${refreshBtn}
+    </div>
+    <div class="rom-table-wrap" style="max-height:65vh;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th>System</th><th>File Name</th><th>Game Name</th><th>Metadata</th><th>Actions</th>
+        </tr></thead>
+        <tbody>
+          ${roms.slice(0, 500).map(r => {
+            const key = r.system + '/' + r.name;
+            const isScraping = !!state.coverScraping[key];
+            return `<tr>
+              <td style="color:var(--purple);white-space:nowrap">${escHtml(r.system)}</td>
+              <td class="rom-name">${escHtml(r.name)}</td>
+              <td style="color:var(--text-dim);font-size:0.82rem">${escHtml(r.game_name || '—')}</td>
+              <td>${r.has_metadata ? `<span class="issue-badge ok">✓ In XML</span>` : `<span class="issue-badge unknown">No entry</span>`}</td>
+              <td>
+                <button class="btn btn-sm" onclick="scrapeCover('${escJs(r.name)}','${escJs(r.system)}','${escJs(r.game_name||'')}')"
+                  ${isScraping ? 'disabled' : ''} title="Fetch cover from ScreenScraper">
+                  ${isScraping ? '⟳ Fetching...' : '🖼 Scrape Cover'}
+                </button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${roms.length > 500 ? `<p style="text-align:center;color:var(--text-dim);padding:12px">Showing 500 of ${roms.length} ROMs</p>` : ''}
+  `;
+}
+
+function renderMissingDescriptions() {
+  const allSystems = [...new Set(state.missingDescriptions.map(r => r.system))].sort();
+  let roms = state.missingDescriptions;
+  if (state.descSystemFilter !== 'all') roms = roms.filter(r => r.system === state.descSystemFilter);
+
+  const systemSelect = `<select onchange="state.descSystemFilter=this.value;render()" style="padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem">
+    <option value="all">All Systems (${state.missingDescriptions.length})</option>
+    ${allSystems.map(s => `<option value="${s}" ${state.descSystemFilter===s?'selected':''}>${escHtml(s)} (${state.missingDescriptions.filter(r=>r.system===s).length})</option>`).join('')}
+  </select>`;
+
+  state._pendingBulkDescRoms = roms;
+  const bulkBtn = roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrapeDescs(state._pendingBulkDescRoms)" ${state.descScrapingBulk ? 'disabled' : ''}>
+    ${state.descScrapingBulk ? `⟳ Scraping (${state.descScrapeQueue.length} left)...` : `📝 Scrape All Missing (${roms.length})`}
+  </button>` : '';
+
+  const refreshBtn = `<button class="btn btn-sm" onclick="loadMissingDescriptions()">↻ Refresh</button>`;
+
+  if (!state.missingDescriptions.length && !state.lastScan) {
+    return `<div class="empty-state"><div class="emoji">📝</div><p>Run a scan first to detect missing descriptions.</p></div>`;
+  }
+  if (!roms.length) {
+    return `
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+        ${systemSelect}${refreshBtn}
+      </div>
+      <div class="empty-state"><div class="emoji">🎉</div><p>All ROMs have descriptions!</p></div>`;
+  }
+
+  return `
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+      ${systemSelect}
+      ${bulkBtn}
+      ${refreshBtn}
+    </div>
+    <div class="rom-table-wrap" style="max-height:65vh;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th>System</th><th>File Name</th><th>Game Name</th><th>Metadata</th><th>Actions</th>
+        </tr></thead>
+        <tbody>
+          ${roms.slice(0, 500).map(r => {
+            const key = r.system + '/' + r.name;
+            const isScraping = !!state.descScraping[key];
+            return `<tr>
+              <td style="color:var(--purple);white-space:nowrap">${escHtml(r.system)}</td>
+              <td class="rom-name">${escHtml(r.name)}</td>
+              <td style="color:var(--text-dim);font-size:0.82rem">${escHtml(r.game_name || '—')}</td>
+              <td>${r.has_metadata ? `<span class="issue-badge ok">✓ In XML</span>` : `<span class="issue-badge unknown">No entry</span>`}</td>
+              <td>
+                <button class="btn btn-sm" onclick="scrapeDescription('${escJs(r.name)}','${escJs(r.system)}','${escJs(r.game_name||'')}')"
+                  ${isScraping ? 'disabled' : ''} title="Fetch description from ScreenScraper">
+                  ${isScraping ? '⟳ Fetching...' : '📝 Scrape Desc'}
+                </button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${roms.length > 500 ? `<p style="text-align:center;color:var(--text-dim);padding:12px">Showing 500 of ${roms.length} ROMs</p>` : ''}
+  `;
+}
+
+function renderSearch() {
+  return `
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="Search ROMs across all systems..." value="${escHtml(state.searchQuery)}" />
+    </div>
+    ${state.searchResults.length ? `
+      <div class="rom-table-wrap" style="max-height:60vh;overflow-y:auto">
+        <table>
+          <thead><tr><th>File Name</th><th>System</th><th>Ext</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${state.searchResults.map(r => `<tr>
+              <td class="rom-name">${escHtml(r.name)}</td>
+              <td><span style="color:var(--purple)">${r.system}</span></td>
+              <td><span class="rom-ext">${r.ext}</span></td>
+              <td class="rom-size">${r.size_human}</td>
+              <td>${r.issue === 'wrong_system' ? `<span class="issue-badge wrong">⚠</span>` : r.issue ? `<span class="issue-badge unknown">?</span>` : `<span class="issue-badge ok">✓</span>`}</td>
+              <td><button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${r.system}')">🗑</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    ` : state.searchQuery.length >= 2 ? '<div class="empty-state"><p>No ROMs found matching your search.</p></div>' : '<div class="empty-state"><div class="emoji">🔍</div><p>Type at least 2 characters to search</p></div>'}
+  `;
+}
+
+function renderWelcome() {
+  return `<div class="empty-state" style="padding:80px 20px">
+    <div class="emoji">🎮</div>
+    <h2 style="margin-bottom:8px">Welcome to Recalbox ROM Manager</h2>
+    <p style="max-width:500px;margin:0 auto;color:var(--text-dim)">
+      Make sure the share path above points to your Recalbox network share,
+      then click <strong>Scan ROMs</strong> to analyze your collection.
+    </p>
+  </div>`;
+}
+
+function renderLoading(msg) {
+  return `<div class="loading"><div class="spinner"></div><p>${msg}</p></div>`;
+}
+
+function renderModal() {
+  const m = state.modal;
+  if (!m) return '';
+
+  // Cover lightbox
+  if (m.type === 'cover') {
+    return `<div class="modal-overlay cover-lightbox" onclick="state.modal=null;render()">
+      <img src="${escHtml(m.url)}" alt="Cover art">
+    </div>`;
+  }
+
+  // Move ROM modal
+  const systemKeys = Object.keys(state.systems).sort();
+  return `<div class="modal-overlay" onclick="if(event.target===this){state.modal=null;render()}">
+    <div class="modal">
+      <h3>Move "${escHtml(m.name)}"</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:12px">Currently in: <strong>${m.system}</strong></p>
+      ${m.suggested_systems?.length ? `<p style="font-size:0.8rem;margin-bottom:8px;color:var(--yellow)">Suggested: ${m.suggested_systems.join(', ')}</p>` : ''}
+      <select id="moveTarget">
+        ${m.suggested_systems?.map(s => `<option value="${s}">${s} (suggested)</option>`).join('') || ''}
+        ${systemKeys.filter(s => s !== m.system && !(m.suggested_systems||[]).includes(s)).map(s => `<option value="${s}">${s}</option>`).join('')}
+      </select>
+      <div class="modal-actions">
+        <button class="btn" onclick="state.modal=null;render()">Cancel</button>
+        <button class="btn btn-primary" onclick="moveRom('${escJs(m.name)}','${m.system}',document.getElementById('moveTarget').value)">Move</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderToasts() {
+  if (!state.toasts.length) return '';
+  return `<div class="toast-container">
+    ${state.toasts.map(t => `<div class="toast ${t.type}">${escHtml(t.msg)}</div>`).join('')}
+  </div>`;
+}
+
+function showMoveModal(rom) {
+  state.modal = rom;
+  render();
+}
+
+// ─── Event Binding ───────────────────────────────────────────────────────────
+function bindEvents() {
+  document.querySelectorAll('.tab[data-tab]').forEach(el => {
+    el.onclick = () => { state.activeTab = el.dataset.tab; state.selectedSystem = null; render(); };
+  });
+  document.querySelectorAll('.system-card[data-system]').forEach(el => {
+    el.onclick = () => loadSystem(el.dataset.system);
+  });
+  const si = document.getElementById('searchInput');
+  if (si) {
+    let debounce;
+    si.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => searchRoms(si.value), 300); };
+    si.focus();
+  }
+  const rf = document.getElementById('romFilter');
+  if (rf) {
+    let debounce;
+    rf.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { state.romFilter = rf.value; state.romPage = 0; render(); }, 200); };
+  }
+  const het = document.getElementById('hideEmptyToggle');
+  if (het) {
+    het.onchange = () => { state.hideEmptySystems = het.checked; render(); };
+  }
+}
+
+// ─── Utils ───────────────────────────────────────────────────────────────────
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escJs(s) { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+
+// ─── Footer ──────────────────────────────────────────────────────────────────
+function renderFooter() {
+  return `<div class="footer">
+    <span>Created by <a href="https://github.com/crs2007" target="_blank" rel="noopener">Sharon Rimer</a> &middot; MIT License</span>
+    <a class="btn-star" href="https://github.com/crs2007/recalbox-manager" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+      </svg>
+      Star on GitHub
+    </a>
+  </div>`;
+}
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
