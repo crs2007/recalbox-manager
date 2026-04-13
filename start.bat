@@ -1,6 +1,7 @@
 @echo off
+for /f "tokens=2 delims== " %%v in ('findstr /r "^APP_VERSION" server.py') do set APP_VERSION=%%~v
 echo ==========================================
-echo   Recalbox ROM Manager v1.0
+echo   Recalbox ROM Manager v%APP_VERSION%
 echo ==========================================
 echo.
 

@@ -26,6 +26,7 @@
   --yellow-dim: rgba(251, 191, 36, 0.12);
   --orange: #fb923c;
   --purple: #a78bfa;
+  --cyan: #06b6d4;
   --radius: 10px;
   --radius-sm: 6px;
 }
@@ -472,7 +473,13 @@ async function init() {
     state.ssConfigured = cfg.screenscraper_configured || false;
   }
   const st = await api('/status');
-  if (st.stats && st.stats.total_files !== undefined) { state.stats = st.stats; state.lastScan = st.last_scan; }
+  if (st.stats && st.stats.total_files !== undefined) {
+    state.stats = st.stats;
+    state.lastScan = st.last_scan;
+    const [covers, descs] = await Promise.all([api('/covers/missing'), api('/descriptions/missing')]);
+    if (Array.isArray(covers)) state.missingCovers = covers;
+    if (Array.isArray(descs)) state.missingDescriptions = descs;
+  }
   state.loading = false;
   render();
 }
@@ -521,7 +528,11 @@ async function loadSystem(name) {
 async function moveRom(filename, fromSystem, toSystem) {
   const r = await api('/move', { method: 'POST', body: { filename, from_system: fromSystem, to_system: toSystem } });
   if (r.ok) {
-    toast(`Moved ${filename} → ${toSystem}`, 'success');
+    if (r.action === 'trashed_duplicate') {
+      toast(`Removed misplaced copy of ${filename} — correct copy already in ${toSystem}`, 'success');
+    } else {
+      toast(`Moved ${filename} → ${toSystem}`, 'success');
+    }
     if (state.selectedSystem) loadSystem(state.selectedSystem.folder);
     state.modal = null;
   } else {
@@ -559,7 +570,9 @@ async function bulkFixMisplaced(system) {
   const r = await api('/bulk-move', { method: 'POST', body: { moves } });
   if (r.results) {
     const moved = r.results.filter(x => x.status === 'moved').length;
-    toast(`Moved ${moved}/${moves.length} ROMs`, 'success');
+    const dupes = r.results.filter(x => x.status === 'trashed_duplicate').length;
+    const msg = [moved && `Moved ${moved}`, dupes && `removed ${dupes} duplicate(s)`].filter(Boolean).join(', ');
+    toast(`${msg || '0 moved'}/${moves.length} ROMs`, 'success');
     loadSystem(system);
   }
 }
@@ -574,8 +587,10 @@ async function fixAllZipContents() {
   const r = await api('/bulk-move', { method: 'POST', body: { moves } });
   if (r.results) {
     const moved = r.results.filter(x => x.status === 'moved').length;
+    const dupes = r.results.filter(x => x.status === 'trashed_duplicate').length;
     const errors = r.results.filter(x => x.status === 'error').length;
-    toast(`Moved ${moved} ROM(s)${errors ? `, ${errors} error(s)` : ''}. Re-scan to update all stats.`, errors ? 'warning' : 'success');
+    const parts = [moved && `Moved ${moved}`, dupes && `removed ${dupes} duplicate(s)`, errors && `${errors} error(s)`].filter(Boolean).join(', ');
+    toast(`${parts}. Re-scan to update all stats.`, errors ? 'warning' : 'success');
     // Refresh diagnostics and issues to reflect the moves
     const diags = await api('/diagnostics');
     if (!diags.error) state.diagnostics = diags;
@@ -592,6 +607,8 @@ async function fixAllZipContents() {
 async function loadMissingCovers() {
   const r = await api('/covers/missing');
   if (Array.isArray(r)) state.missingCovers = r;
+  const st = await api('/status');
+  if (st.stats) state.stats = st.stats;
   render();
 }
 
@@ -602,11 +619,17 @@ async function scrapeCover(filename, system, gameName) {
   const r = await api('/covers/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
   delete state.coverScraping[key];
   if (r.ok) {
-    toast('Cover saved for ' + filename, 'success');
+    if (r.gamelist_updated === false) {
+      toast('Cover downloaded but failed to save to gamelist.xml — changes will be lost on next scan', 'error');
+    } else {
+      toast('Cover saved for ' + filename, 'success');
+      state.missingCovers = state.missingCovers.filter(m => !(m.name === filename && m.system === system));
+    }
     // Reload system detail if open, and refresh missing covers list
     if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
-    // Remove from missing covers list
-    state.missingCovers = state.missingCovers.filter(m => !(m.name === filename && m.system === system));
+    // Refresh dashboard stats
+    const st = await api('/status');
+    if (st.stats) state.stats = st.stats;
   } else {
     const msgs = {
       no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
@@ -644,6 +667,8 @@ function startBulkScrape(roms) {
 async function loadMissingDescriptions() {
   const r = await api('/descriptions/missing');
   if (Array.isArray(r)) state.missingDescriptions = r;
+  const st = await api('/status');
+  if (st.stats) state.stats = st.stats;
   render();
 }
 
@@ -654,9 +679,16 @@ async function scrapeDescription(filename, system, gameName) {
   const r = await api('/descriptions/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
   delete state.descScraping[key];
   if (r.ok) {
-    toast('Description saved for ' + filename, 'success');
+    if (r.gamelist_updated === false) {
+      toast('Description fetched but failed to save to gamelist.xml — changes will be lost on next scan', 'error');
+    } else {
+      toast('Description saved for ' + filename, 'success');
+      state.missingDescriptions = state.missingDescriptions.filter(m => !(m.name === filename && m.system === system));
+    }
     if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
-    state.missingDescriptions = state.missingDescriptions.filter(m => !(m.name === filename && m.system === system));
+    // Refresh dashboard stats
+    const st = await api('/status');
+    if (st.stats) state.stats = st.stats;
   } else {
     const msgs = {
       no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
@@ -719,6 +751,8 @@ function showCoverModal(url) {
 // ─── Render ──────────────────────────────────────────────────────────────────
 function render() {
   const app = document.getElementById('app');
+  const scrollY = window.scrollY;
+  const innerScrolls = [...document.querySelectorAll('.rom-table-wrap')].map(el => el.scrollTop);
   app.innerHTML = `
     ${renderHeader()}
     ${renderConfig()}
@@ -732,12 +766,16 @@ function render() {
     ${renderToasts()}
     ${renderFooter()}
   `;
+  window.scrollTo({ top: scrollY, behavior: 'instant' });
+  document.querySelectorAll('.rom-table-wrap').forEach((el, i) => {
+    if (innerScrolls[i] != null) el.scrollTop = innerScrolls[i];
+  });
   bindEvents();
 }
 
 function renderHeader() {
   return `<div class="header">
-    <h1>⬡ Recalbox ROM Manager <span>v2026.04.0</span></h1>
+    <h1>⬡ Recalbox ROM Manager <span>${state.config?.version ? 'v' + state.config.version : ''}</span></h1>
     <div class="header-actions">
       ${state.lastScan ? `<span style="font-size:0.75rem;color:var(--text-dim)">Last scan: ${new Date(state.lastScan).toLocaleString()}</span>` : ''}
       <button class="btn btn-primary" onclick="startScan()" ${state.scanning ? 'disabled' : ''}>
@@ -877,7 +915,7 @@ function renderSystemDetail() {
     return a.name.localeCompare(b.name);
   });
   const totalPages = Math.ceil(roms.length / state.ROM_PAGE_SIZE);
-  const page = Math.min(state.romPage, totalPages - 1);
+  const page = roms.length ? Math.min(state.romPage, totalPages - 1) : 0;
   const pageRoms = roms.slice(page * state.ROM_PAGE_SIZE, (page + 1) * state.ROM_PAGE_SIZE);
 
   return `
@@ -1135,6 +1173,7 @@ function renderDiagnostics() {
                   f.status === 'missing' && f.required ? `<span class="bios-missing">✗ Missing</span>` :
                   f.status === 'missing' ? `<span class="bios-optional">– Optional</span>` :
                   f.status === 'wrong_version' ? `<span class="bios-wrong">⚠ Wrong version</span>` :
+                  f.status === 'wrong_case' ? `<span class="bios-wrong">⚠ Wrong filename case${f.actual_name ? ` (found: ${escHtml(f.actual_name)})` : ''}</span>` :
                   `<span class="bios-optional">${escHtml(f.status)}</span>`
                 }</td>
                 <td style="color:var(--text-dim);font-size:0.8rem">${escHtml(f.desc)}${f.expected_md5 ? `<br><span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:var(--text-muted)">MD5: ${f.expected_md5}</span>` : ''}</td>

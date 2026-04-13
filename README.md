@@ -13,7 +13,7 @@ A web-based tool to organize, diagnose, and manage your [Recalbox](https://www.r
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
-- [Cover Art (ScreenScraper)](#cover-art-screenscraper)
+- [Cover Art & Descriptions (ScreenScraper)](#cover-art--descriptions-screenscraper)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
 - [Supported Systems](#supported-systems)
@@ -31,11 +31,12 @@ A web-based tool to organize, diagnose, and manage your [Recalbox](https://www.r
 - **ROM Diagnostics** — Detects why a game might fail to load: missing `.cue` files, no `.m3u` playlist for multi-disc games, broken `.m3u` references, empty/corrupt files, likely overdumps, and **ZIP content mismatch** (archive accepted by the system but contains files for a different system)
 - **BIOS Status Check** — Verifies required BIOS files are present for every system that needs them, with optional MD5 hash validation
 - **Cover Art** — Reads existing `gamelist.xml` covers and fetches missing ones from [ScreenScraper.fr](https://www.screenscraper.fr/). Covers are saved to the Recalbox share and instantly visible on your TV.
+- **Game Descriptions** — Reads existing `gamelist.xml` descriptions and fetches missing ones from ScreenScraper. Descriptions appear in EmulationStation when you browse your library.
 - **Move ROMs** — Relocate files to the correct system folder via the UI
 - **Bulk Auto-Fix** — One-click fix for misplaced ROMs with an unambiguous target, and bulk-move all wrong-ZIP-contents ROMs to their correct systems
 - **Safe Delete** — Moves deleted files to a `_trash` folder instead of permanently deleting
 - **Search** — Find any ROM across all systems instantly
-- **System Health Dashboard** — At-a-glance status for every emulator folder
+- **System Health Dashboard** — At-a-glance status for every emulator folder, including counts for files with covers and descriptions
 
 ## Screenshots
 
@@ -70,7 +71,7 @@ start.bat
 ```bat
 git clone https://github.com/crs2007/recalbox-manager.git
 cd recalbox-manager
-pip install flask flask-cors py7zr
+pip install -r requirements.txt
 python server.py
 ```
 
@@ -80,13 +81,14 @@ Then open **http://localhost:5123** in your browser.
 
 1. **Check connection** — The top bar shows the current share path. If it says **Connected**, your Recalbox is reachable. If not, update the path (see [Configuration](#configuration)).
 2. **Scan ROMs** — Click the **Scan ROMs** button. The first scan over SMB can take 1–3 minutes for large collections.
-3. **Review Systems** — The Systems tab shows every emulator folder with counts of OK, misplaced, cover art, and total files.
+3. **Review Systems** — The Systems tab shows every emulator folder with counts of OK, misplaced, cover art, descriptions, and total files.
 4. **Fix Issues** — Switch to the Issues tab to see misplaced ROMs. Use **Auto-Fix** for unambiguous moves, or move files individually.
 5. **Check Duplicates** — The Duplicates tab groups identical files (by content hash) so you can decide which copy to keep.
 6. **Run Diagnostics** — The Diagnostics tab flags ROMs that are present but likely broken: missing `.cue` files, corrupt archives, empty files, etc.
 7. **Check BIOS** — The Diagnostics tab also shows which required BIOS files are present, missing, or the wrong version.
 8. **Cover Art** — The Missing Covers tab shows all ROMs without artwork. Click **🖼 Scrape Cover** per ROM or **Scrape All Missing** to bulk-fetch from ScreenScraper.
-9. **Search** — Use the Search tab to find any ROM across all systems instantly.
+9. **Game Descriptions** — The Missing Descriptions tab shows all ROMs without a description. Click **Scrape** per ROM or **Scrape All Missing** to bulk-fetch descriptions from ScreenScraper. Descriptions are written to each system's `gamelist.xml` and appear in EmulationStation.
+10. **Search** — Use the Search tab to find any ROM across all systems instantly.
 
 ## Configuration
 
@@ -111,6 +113,8 @@ python server.py
 | `PORT` | `5123` | Local server port |
 | `SS_USER` | *(none)* | ScreenScraper username (alternative to `screenscraper.cfg`) |
 | `SS_PASS` | *(none)* | ScreenScraper password (alternative to `screenscraper.cfg`) |
+| `SS_DEVID` | *(none)* | ScreenScraper developer ID (alternative to `screenscraper.cfg`) |
+| `SS_DEVPASS` | *(none)* | ScreenScraper developer password (alternative to `screenscraper.cfg`) |
 
 ### Port
 
@@ -119,16 +123,23 @@ set PORT=8080
 python server.py
 ```
 
-## Cover Art (ScreenScraper)
+## Cover Art & Descriptions (ScreenScraper)
 
-The tool integrates with [ScreenScraper.fr](https://www.screenscraper.fr/) — the same service Recalbox uses internally — to fetch box art for ROMs that don't have it yet.
+The tool integrates with [ScreenScraper.fr](https://www.screenscraper.fr/) — the same service Recalbox uses internally — to fetch box art and game descriptions for ROMs that don't have them yet.
 
-### How it works
+### Cover Art — how it works
 
 1. On every scan, the tool reads each system's `gamelist.xml` to detect which ROMs already have cover images (and verifies the image file actually exists on the share).
 2. ROMs without covers are listed in the **Missing Covers** tab.
 3. You can scrape one ROM at a time or use **Scrape All Missing** to process the whole list automatically (with a 1.2-second delay between requests to respect rate limits).
 4. Each fetched image is saved to `\\RECALBOX\share\roms\<system>\media\images\` and the `gamelist.xml` is updated automatically. Recalbox will display the cover art immediately the next time you browse that system.
+
+### Game Descriptions — how it works
+
+1. On every scan, the tool reads each system's `gamelist.xml` to detect which ROMs already have a `<desc>` entry.
+2. ROMs without descriptions are listed in the **Missing Descriptions** tab, alongside their human-readable game name (from `gamelist.xml`) if available.
+3. You can scrape one ROM at a time or use **Scrape All Missing** to process the entire list automatically (same 1.2-second rate limit as covers).
+4. Each fetched description is written directly into the system's `gamelist.xml`. EmulationStation will show the description when you highlight the game in your library.
 
 ### Setting up ScreenScraper credentials
 
@@ -217,6 +228,8 @@ recalbox-manager/
 | GET | `/api/covers/image/<system>/<file>` | Proxy a cover image from the SMB share to the browser |
 | GET | `/api/covers/missing` | All properly-placed ROMs that have no cover art |
 | POST | `/api/covers/scrape` | Fetch cover from ScreenScraper and update `gamelist.xml` |
+| GET | `/api/descriptions/missing` | All properly-placed ROMs that have no description |
+| POST | `/api/descriptions/scrape` | Fetch description from ScreenScraper and update `gamelist.xml` |
 | GET | `/api/gamelist/<system>` | Parsed `gamelist.xml` data for a system |
 | POST | `/api/gamelist/update` | Merge or insert a `<game>` entry in `gamelist.xml` |
 

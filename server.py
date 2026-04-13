@@ -35,6 +35,8 @@ CORS(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+APP_VERSION = "2026.04.4"
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
 # Access share-derived paths via _roms_root() / _bios_root() helpers.
@@ -318,7 +320,7 @@ BIOS_REQUIREMENTS = {
         {"file": "scph5501.bin", "md5": "490f666e1afb15b7362b406ed1cea246", "required": False, "desc": "BIOS v3.0 (USA)"},
         {"file": "scph5502.bin", "md5": "32736f17079d0b2b7024407c39bd3050", "required": False, "desc": "BIOS v3.0 (Europe)"},
     ],
-    "dc": [
+    "dreamcast": [
         {"file": "dc_boot.bin", "md5": "e10c53c2f8b90bab96ead2d368858623", "required": True, "desc": "Dreamcast BIOS"},
         {"file": "dc_flash.bin", "md5": "0a93f7940c455905bea6e392dfde92a4", "required": True, "desc": "Dreamcast Flash"},
     ],
@@ -459,6 +461,46 @@ DIAGNOSTIC_SOLUTIONS = {
         ],
         "search_query": "recalbox rom wrong system zip contents",
     },
+    "smc_copier_header": {
+        "title": "SNES ROM has legacy copier header",
+        "description": (
+            "This .smc file contains a 512-byte copier header added by old backup hardware. "
+            "Many libretro SNES cores reject it, causing a black screen or crash on load."
+        ),
+        "steps": [
+            "Rename the file from .smc to .sfc — some cores auto-detect and skip the header.",
+            "If renaming does not fix it, strip the header using: dd if=game.smc of=game.sfc bs=512 skip=1",
+            "Alternatively, find a clean No-Intro dump (.sfc) which never contains copier headers.",
+        ],
+        "search_query": "snes smc copier header strip recalbox",
+    },
+    "invalid_nes_header": {
+        "title": "NES ROM has invalid iNES header",
+        "description": (
+            "This .nes file does not start with the expected iNES magic bytes (NES\\x1a). "
+            "It may be a corrupt download, a renamed non-NES file, or a legacy bad dump."
+        ),
+        "steps": [
+            "Re-download the ROM from a No-Intro verified source.",
+            "Verify the file is actually a NES ROM and not a file with a renamed extension.",
+            "If you have a hex editor, check that the first 4 bytes are: 4E 45 53 1A",
+        ],
+        "search_query": "nes ines header invalid bad dump no-intro",
+    },
+    "n64_non_canonical": {
+        "title": "N64 ROM is in non-canonical byte order",
+        "description": (
+            "This file uses a byte-swapped (.v64) or little-endian (.n64) format. "
+            "The canonical N64 format is big-endian (.z64). While Mupen64Plus-Next handles "
+            "runtime conversion, some Recalbox cores may fail or perform slower with these formats."
+        ),
+        "steps": [
+            "Convert to .z64 (big-endian) using Tool64 or a similar N64 ROM conversion utility.",
+            "Rename the output file to .z64 after conversion.",
+            "If the game works fine as-is, no action is required — this is an advisory warning.",
+        ],
+        "search_query": "n64 v64 z64 byte swap convert tool64",
+    },
 }
 
 # CD-based systems that require .cue files alongside .bin
@@ -521,8 +563,23 @@ def check_bios_status() -> dict:
             else:
                 fpath = os.path.join(_bios_root(), fname)
 
+            actual_name = None  # set when wrong_case is detected
             if not os.path.exists(fpath):
+                # Check for a case-insensitive match — BIOS filenames are case-sensitive on
+                # the Pi (Linux ext4) but Windows SMB access is case-insensitive, so a file
+                # named SCPH1001.BIN will be found by os.path.exists() on Windows but fail
+                # to load on Recalbox.
                 status = "missing"
+                bios_dir = os.path.dirname(fpath)
+                fname_lower = fname.lower()
+                try:
+                    for entry_fs in os.scandir(bios_dir):
+                        if entry_fs.name.lower() == fname_lower and entry_fs.name != fname:
+                            status = "wrong_case"
+                            actual_name = entry_fs.name
+                            break
+                except OSError:
+                    pass
             elif "md5" in entry:
                 try:
                     actual_md5 = get_bios_md5(fpath)
@@ -532,14 +589,17 @@ def check_bios_status() -> dict:
             else:
                 status = "ok"
 
-            system_status.append({
+            bios_entry: dict = {
                 "file": fname,
                 "required": required,
                 "status": status,
                 "desc": entry.get("desc", ""),
                 "expected_md5": entry.get("md5"),
                 "path": fpath,
-            })
+            }
+            if actual_name is not None:
+                bios_entry["actual_name"] = actual_name
+            system_status.append(bios_entry)
         result[system] = {
             "display_name": SYSTEM_DISPLAY_NAMES.get(system, system),
             "bios_files": system_status,
@@ -684,27 +744,31 @@ def run_rom_diagnostics(system_key: str, system_path: str, roms: list[dict]) -> 
             rom["diagnostics"].append("empty_file")
 
     # --- Check 5: Likely overdump (last 512 bytes all 0xFF or 0x00) ---
-    for rom in roms:
-        if rom["size"] < 65536:
-            continue  # too small to meaningfully sample
-        if rom["ext"] in {".zip", ".7z", ".cue", ".m3u", ".chd", ".iso", ".pbp"}:
-            continue  # compressed/metadata formats
-        try:
-            fpath = rom["path"]
-            with open(fpath, "rb") as f:
-                f.seek(-512, 2)
-                tail = f.read(512)
-            if tail and (tail == bytes([tail[0]]) * len(tail)) and tail[0] in (0x00, 0xFF):
-                diag = {
-                    "key": "likely_overdump",
-                    "file": rom["name"],
-                    "system": system_key,
-                    **{k: DIAGNOSTIC_SOLUTIONS["likely_overdump"][k] for k in ("title", "description")},
-                }
-                diag_issues.append(diag)
-                rom["diagnostics"].append("likely_overdump")
-        except OSError:
-            pass
+    # Skip systems where 0xFF tail padding is normal: N64 and GBA cartridges use erased-flash
+    # (0xFF) to fill unused ROM address space, so clean verified dumps commonly end with 0xFF.
+    _overdump_skip_systems = {"n64", "gba"}
+    if system_key not in _overdump_skip_systems:
+        for rom in roms:
+            if rom["size"] < 65536:
+                continue  # too small to meaningfully sample
+            if rom["ext"] in {".zip", ".7z", ".cue", ".m3u", ".chd", ".iso", ".pbp"}:
+                continue  # compressed/metadata formats
+            try:
+                fpath = rom["path"]
+                with open(fpath, "rb") as f:
+                    f.seek(-512, 2)
+                    tail = f.read(512)
+                if tail and (tail == bytes([tail[0]]) * len(tail)) and tail[0] in (0x00, 0xFF):
+                    diag = {
+                        "key": "likely_overdump",
+                        "file": rom["name"],
+                        "system": system_key,
+                        **{k: DIAGNOSTIC_SOLUTIONS["likely_overdump"][k] for k in ("title", "description")},
+                    }
+                    diag_issues.append(diag)
+                    rom["diagnostics"].append("likely_overdump")
+            except OSError:
+                pass
 
     # --- Check 6: Corrupt ZIP archives ---
     for rom in roms:
@@ -772,6 +836,64 @@ def run_rom_diagnostics(system_key: str, system_path: str, roms: list[dict]) -> 
             }
             diag_issues.append(diag)
             rom["diagnostics"].append("wrong_zip_contents")
+
+    # --- Check 8: SNES .smc copier header ---
+    # Unheadered SNES ROMs are exact multiples of 1 KB. A 512-byte legacy copier header
+    # (added by old backup hardware like the Super Wild Card) makes file_size % 1024 == 512.
+    # Many libretro SNES cores reject such files with a black screen or load failure.
+    if system_key in {"snes", "satellaview", "sufami"}:
+        for rom in roms:
+            if rom["ext"] == ".smc" and rom["size"] > 512 and rom["size"] % 1024 == 512:
+                diag = {
+                    "key": "smc_copier_header",
+                    "file": rom["name"],
+                    "system": system_key,
+                    **{k: DIAGNOSTIC_SOLUTIONS["smc_copier_header"][k] for k in ("title", "description")},
+                }
+                diag_issues.append(diag)
+                rom["diagnostics"].append("smc_copier_header")
+
+    # --- Check 9: NES iNES magic number ---
+    # Valid NES ROMs always begin with the iNES magic: 0x4E 0x45 0x53 0x1A ("NES\x1a").
+    # A .nes file without this signature is a corrupt download, a renamed non-NES file,
+    # or a legacy bad dump with a "DiskDude!" header corruption.
+    if system_key in {"nes", "fds"}:
+        for rom in roms:
+            if rom["ext"] != ".nes" or rom["size"] < 16:
+                continue
+            if "empty_file" in rom.get("diagnostics", []):
+                continue  # already flagged
+            try:
+                with open(rom["path"], "rb") as f:
+                    magic = f.read(4)
+                if magic != b"NES\x1a":
+                    diag = {
+                        "key": "invalid_nes_header",
+                        "file": rom["name"],
+                        "system": system_key,
+                        **{k: DIAGNOSTIC_SOLUTIONS["invalid_nes_header"][k] for k in ("title", "description")},
+                    }
+                    diag_issues.append(diag)
+                    rom["diagnostics"].append("invalid_nes_header")
+            except OSError:
+                pass
+
+    # --- Check 10: N64 non-canonical byte order ---
+    # The canonical N64 format is big-endian (.z64). Byte-swapped (.v64) and little-endian
+    # (.n64) dumps work in Mupen64Plus-Next via runtime conversion, but some Recalbox cores
+    # may fail or perform slower. This is an advisory warning, not an error.
+    if system_key == "n64":
+        for rom in roms:
+            if rom["ext"] in {".v64", ".n64"}:
+                diag = {
+                    "key": "n64_non_canonical",
+                    "file": rom["name"],
+                    "system": system_key,
+                    "format": rom["ext"],
+                    **{k: DIAGNOSTIC_SOLUTIONS["n64_non_canonical"][k] for k in ("title", "description")},
+                }
+                diag_issues.append(diag)
+                rom["diagnostics"].append("n64_non_canonical")
 
     return diag_issues
 
@@ -1049,6 +1171,7 @@ def index():
 def get_config():
     """Return current configuration."""
     return jsonify({
+        "version": APP_VERSION,
         "roms_root": _roms_root(),
         "share_path": _config["share"],
         "accessible": os.path.exists(_roms_root()),
@@ -1188,7 +1311,21 @@ def move_rom():
         return jsonify({"error": f"Destination system folder not found: {dst_system}"}), 404
 
     if os.path.exists(dst_path):
-        return jsonify({"error": f"File already exists in {dst_system}"}), 409
+        src_hash = get_file_hash(src_path)
+        dst_hash = get_file_hash(dst_path)
+        if src_hash and dst_hash and src_hash == dst_hash:
+            # Identical content — trash the misplaced source, destination already correct
+            trash_dir = os.path.join(_roms_root(), "_trash", src_system)
+            os.makedirs(trash_dir, exist_ok=True)
+            shutil.move(src_path, os.path.join(trash_dir, filename))
+            logger.info(f"Trashed misplaced duplicate {filename} from {src_system} (identical copy already in {dst_system})")
+            return jsonify({
+                "ok": True,
+                "action": "trashed_duplicate",
+                "message": f"Identical copy already exists in {dst_system} — misplaced file removed.",
+                "moved": {"file": filename, "from": src_system, "to": dst_system},
+            })
+        return jsonify({"error": f"File already exists in {dst_system} (different content)"}), 409
 
     try:
         shutil.move(src_path, dst_path)
@@ -1256,6 +1393,16 @@ def bulk_move():
             if os.path.exists(src) and os.path.isdir(dst_dir) and not os.path.exists(dst):
                 shutil.move(src, dst)
                 results.append({"file": filename, "status": "moved"})
+            elif os.path.exists(src) and os.path.isdir(dst_dir) and os.path.exists(dst):
+                src_hash = get_file_hash(src)
+                dst_hash = get_file_hash(dst)
+                if src_hash and dst_hash and src_hash == dst_hash:
+                    trash_dir = os.path.join(_roms_root(), "_trash", from_system)
+                    os.makedirs(trash_dir, exist_ok=True)
+                    shutil.move(src, os.path.join(trash_dir, filename))
+                    results.append({"file": filename, "status": "trashed_duplicate"})
+                else:
+                    results.append({"file": filename, "status": "skipped", "reason": "different content"})
             else:
                 results.append({"file": filename, "status": "skipped"})
         except (OSError, shutil.Error) as e:
@@ -1485,7 +1632,7 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
         params["romrecherche"] = search_term  # text search field (keeps romnom for hash matching)
 
     url = "https://www.screenscraper.fr/api2/jeuInfos.php?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "recalbox-manager/2026.04.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1595,7 +1742,7 @@ def fetch_libretro_cover(system_key, rom_filename, game_name=""):
     encoded_name = urllib.parse.quote(safe_name, safe='')
     img_url = f"https://thumbnails.libretro.com/{encoded_system}/Named_Boxarts/{encoded_name}.png"
 
-    req = urllib.request.Request(img_url, headers={"User-Agent": "recalbox-manager/2026.04.0"})
+    req = urllib.request.Request(img_url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             img_data = resp.read()
@@ -1670,7 +1817,7 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
         params["romrecherche"] = search_term
 
     url = "https://www.screenscraper.fr/api2/jeuInfos.php?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "recalbox-manager/2026.04.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1750,18 +1897,27 @@ def scrape_cover():
         "image": image_rel,
     })
 
-    # Update the in-memory ROM object so UI refresh works without a full rescan
-    sys_info = scan_cache.get("systems", {}).get(system)
-    if sys_info:
-        for rom in sys_info.get("roms", []):
-            if rom["name"] == filename:
-                rom["has_cover"] = True
-                rom["cover_url"] = result["cover_url"]
-                if not rom.get("game_name") and game_name:
-                    rom["game_name"] = game_name
-                break
-        # Update cover_count on the system
-        sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
+    # Only update the in-memory cache when gamelist.xml was actually written.
+    if write_result.get("ok"):
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if sys_info:
+            for rom in sys_info.get("roms", []):
+                if rom["name"] == filename:
+                    rom["has_cover"] = True
+                    rom["cover_url"] = result["cover_url"]
+                    if not rom.get("game_name") and game_name:
+                        rom["game_name"] = game_name
+                    break
+            # Update cover_count on the system
+            sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
+        if scan_cache.get("stats"):
+            scan_cache["stats"]["total_with_covers"] = sum(
+                s.get("cover_count", 0) for s in scan_cache.get("systems", {}).values()
+            )
+            scan_cache["stats"]["total_missing_covers"] = sum(
+                sum(1 for r in s.get("roms", []) if not r.get("has_cover") and r.get("issue") is None)
+                for s in scan_cache.get("systems", {}).values()
+            )
 
     return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
 
@@ -1793,24 +1949,29 @@ def scrape_description():
         "desc": result["desc"],
     })
 
-    # Update the in-memory ROM object so UI refresh works without a full rescan
-    sys_info = scan_cache.get("systems", {}).get(system)
-    if sys_info:
-        for rom in sys_info.get("roms", []):
-            if rom["name"] == filename:
-                rom["has_description"] = True
-                if not rom.get("game_name") and game_name:
-                    rom["game_name"] = game_name
-                break
-        sys_info["description_count"] = sum(1 for r in sys_info["roms"] if r.get("has_description"))
-    if scan_cache.get("stats"):
-        scan_cache["stats"]["total_with_descriptions"] = sum(
-            s.get("description_count", 0) for s in scan_cache.get("systems", {}).values()
-        )
-        scan_cache["stats"]["total_missing_descriptions"] = sum(
-            sum(1 for r in s.get("roms", []) if not r.get("has_description") and r.get("issue") is None)
-            for s in scan_cache.get("systems", {}).values()
-        )
+    # Only update the in-memory cache when gamelist.xml was actually written.
+    # If the write failed, leave the cache unchanged so the UI stays honest —
+    # marking has_description=True when the file wasn't saved would cause the
+    # "missing descriptions" count to silently drop during the session but jump
+    # back up on the next scan (which re-reads from gamelist.xml).
+    if write_result.get("ok"):
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if sys_info:
+            for rom in sys_info.get("roms", []):
+                if rom["name"] == filename:
+                    rom["has_description"] = True
+                    if not rom.get("game_name") and game_name:
+                        rom["game_name"] = game_name
+                    break
+            sys_info["description_count"] = sum(1 for r in sys_info["roms"] if r.get("has_description"))
+        if scan_cache.get("stats"):
+            scan_cache["stats"]["total_with_descriptions"] = sum(
+                s.get("description_count", 0) for s in scan_cache.get("systems", {}).values()
+            )
+            scan_cache["stats"]["total_missing_descriptions"] = sum(
+                sum(1 for r in s.get("roms", []) if not r.get("has_description") and r.get("issue") is None)
+                for s in scan_cache.get("systems", {}).values()
+            )
 
     return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
 
