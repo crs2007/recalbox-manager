@@ -511,6 +511,8 @@ async function startScan() {
   if (Array.isArray(missing)) state.missingCovers = missing;
   const missingDescs = await api('/descriptions/missing');
   if (Array.isArray(missingDescs)) state.missingDescriptions = missingDescs;
+  const cfg = await api('/config');
+  if (!cfg.error) state.config = cfg;
   toast(`Scan complete! ${r.stats.total_files} files found`, 'success');
   render();
 }

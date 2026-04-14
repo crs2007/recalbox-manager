@@ -2,6 +2,14 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.04.6 — 2026-04-14
+### Fixed
+- Connection indicator now updates to "Connected" after a successful scan — previously it stayed "Not found" if the Recalbox was offline when the page first loaded
+
+## v2026.04.5 — 2026-04-13
+### Added
+- Bootleg Games Fandom wiki as secondary description source; used as fallback when ScreenScraper returns `not_found` or has no credentials
+
 ## v2026.04.4 — 2026-04-13
 ### Changed
 - `start.bat` no longer has a hardcoded version string. It reads `APP_VERSION` from

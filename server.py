@@ -35,7 +35,7 @@ CORS(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.04.4"
+APP_VERSION = "2026.04.6"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1857,6 +1857,77 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
     return {"ok": True, "desc": desc}
 
 
+def fetch_bootleggames_description(rom_filename, game_name=""):
+    """
+    Fetch game description from Bootleg Games Fandom wiki as a fallback.
+    Uses MediaWiki opensearch + extracts API — no auth required.
+    Returns {ok, desc?, error?}.
+    Never raises — all errors returned in dict.
+    """
+    search_name = game_name or _clean_rom_name(rom_filename)
+    if not search_name:
+        return {"ok": False, "error": "no_name"}
+
+    ua = {"User-Agent": f"recalbox-manager/{APP_VERSION}"}
+
+    # Step 1: opensearch to find best matching page title
+    search_url = (
+        "https://bootleggames.fandom.com/api.php?"
+        + urllib.parse.urlencode({
+            "action": "opensearch",
+            "search": search_name,
+            "limit": "3",
+            "format": "json",
+        })
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(search_url, headers=ua), timeout=10
+        ) as resp:
+            search_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return {"ok": False, "error": "bg_down", "detail": str(e)}
+
+    # opensearch response: [query, [titles], [descriptions], [urls]]
+    titles = search_data[1] if len(search_data) > 1 else []
+    if not titles:
+        return {"ok": False, "error": "not_found"}
+
+    page_title = titles[0]
+
+    # Step 2: fetch plain-text intro extract for the page
+    extract_url = (
+        "https://bootleggames.fandom.com/api.php?"
+        + urllib.parse.urlencode({
+            "action": "query",
+            "prop": "extracts",
+            "exintro": "true",
+            "explaintext": "true",
+            "titles": page_title,
+            "format": "json",
+        })
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(extract_url, headers=ua), timeout=10
+        ) as resp:
+            extract_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return {"ok": False, "error": "bg_down", "detail": str(e)}
+
+    pages = extract_data.get("query", {}).get("pages", {})
+    if not pages:
+        return {"ok": False, "error": "not_found"}
+
+    page = next(iter(pages.values()))
+    extract = (page.get("extract") or "").strip()
+    if not extract:
+        return {"ok": False, "error": "not_found"}
+
+    logger.info(f"Got description for {rom_filename} from Bootleg Games Wiki ({len(extract)} chars)")
+    return {"ok": True, "desc": extract, "source": "bootleggames"}
+
+
 @app.route("/api/covers/scrape", methods=["POST"])
 def scrape_cover():
     """Fetch cover art from ScreenScraper for one ROM and update gamelist.xml."""
@@ -1934,6 +2005,14 @@ def scrape_description():
         return jsonify({"error": "Missing filename or system"}), 400
 
     result = fetch_screenscraper_description(system, filename, game_name)
+
+    # Fallback to Bootleg Games Wiki when ScreenScraper can't help
+    if not result["ok"] and result.get("error") in (
+        "not_found", "no_credentials", "no_devid", "unsupported_system"
+    ):
+        logger.info(f"ScreenScraper miss ({result.get('error')}) for {filename}, trying Bootleg Games Wiki...")
+        result = fetch_bootleggames_description(filename, game_name)
+
     if not result["ok"]:
         return jsonify(result)
 
