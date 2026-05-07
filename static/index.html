@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Recalbox ROM Manager</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -134,6 +135,8 @@ body::before {
 }
 .stat-card.warning .stat-value { color: var(--yellow); }
 .stat-card.danger .stat-value { color: var(--red); }
+.stat-card.clickable { cursor: pointer; transition: border-color 0.2s, transform 0.15s; }
+.stat-card.clickable:hover { border-color: var(--accent); transform: translateY(-2px); }
 
 /* ─── Tabs ─── */
 .tabs {
@@ -362,6 +365,169 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
   width: 160px; flex: none;
 }
 
+/* ─── Netflix Browse Mode ─── */
+.browse-container { max-height: 78vh; overflow-y: auto; padding: 4px 0; }
+.browse-filter-bar {
+  display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;
+}
+.browse-filter-bar input {
+  flex: 1; min-width: 200px; padding: 8px 12px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: 0.85rem; font-family: 'Outfit', sans-serif;
+}
+.browse-filter-bar select {
+  padding: 8px 12px; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem;
+  font-family: 'Outfit', sans-serif; cursor: pointer;
+}
+.browse-row { margin-bottom: 28px; }
+.browse-row-header {
+  display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;
+  padding: 0 4px;
+}
+.browse-row-header h3 {
+  font-size: 1.1rem; font-weight: 600; color: var(--text);
+}
+.browse-row-header .browse-count {
+  font-size: 0.78rem; color: var(--text-muted);
+}
+.browse-row-wrap { position: relative; }
+.browse-row-scroll {
+  display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory;
+  padding: 8px 4px 12px; scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.browse-row-scroll::-webkit-scrollbar { height: 6px; }
+.browse-row-scroll::-webkit-scrollbar-track { background: transparent; }
+.browse-row-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.browse-row-scroll::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+.browse-card {
+  width: 150px; min-width: 150px; scroll-snap-align: start;
+  cursor: pointer; border-radius: var(--radius); overflow: hidden;
+  background: var(--bg-card); border: 1px solid var(--border);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  position: relative; flex-shrink: 0;
+}
+.browse-card:hover {
+  transform: translateY(-6px); border-color: var(--accent);
+  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.15);
+}
+.browse-card-img {
+  width: 150px; height: 200px; overflow: hidden;
+  background: var(--bg-input); display: flex; align-items: center; justify-content: center;
+}
+.browse-card-img img { width: 100%; height: 100%; object-fit: cover; }
+.browse-card-placeholder {
+  font-size: 2.5rem; color: var(--text-muted); opacity: 0.4;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+}
+.browse-card-name {
+  padding: 8px 10px; font-size: 0.78rem; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text);
+}
+.browse-card-overlay {
+  position: absolute; inset: 0; background: rgba(10, 14, 23, 0.92);
+  padding: 14px 12px; display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 4px; font-size: 0.75rem; color: var(--text-dim);
+  opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+}
+.browse-card:hover .browse-card-overlay { opacity: 1; }
+.browse-card-overlay .overlay-title {
+  font-size: 0.85rem; font-weight: 600; color: var(--text);
+  margin-bottom: 4px; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.browse-card-overlay .overlay-desc {
+  font-size: 0.72rem; color: var(--text-dim); line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.browse-card-overlay .overlay-meta {
+  font-size: 0.7rem; color: var(--text-muted); margin-top: auto;
+}
+.browse-scroll-btn {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 36px; height: 36px; border-radius: 50%;
+  background: rgba(17, 24, 39, 0.9); border: 1px solid var(--border);
+  color: var(--text); cursor: pointer; font-size: 1rem;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+  backdrop-filter: blur(4px);
+}
+.browse-scroll-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+.browse-scroll-btn.left { left: -4px; }
+.browse-scroll-btn.right { right: -4px; }
+.browse-row-skeleton {
+  height: 260px; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); font-size: 0.85rem;
+}
+.browse-show-more {
+  min-width: 80px; height: 200px; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-card); border: 1px dashed var(--border); border-radius: var(--radius);
+  color: var(--accent); font-size: 0.78rem; cursor: pointer; flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.browse-show-more:hover { background: var(--accent-glow); border-color: var(--accent); }
+
+/* ─── Metadata Edit Modal ─── */
+.edit-modal { min-width: 620px; max-width: 800px; }
+.edit-modal-grid {
+  display: grid; grid-template-columns: 200px 1fr; gap: 20px; margin-top: 16px;
+}
+.edit-modal-cover {
+  width: 200px; border-radius: var(--radius); overflow: hidden;
+  background: var(--bg-input); border: 1px solid var(--border);
+}
+.edit-modal-cover img { width: 100%; display: block; }
+.edit-modal-cover-placeholder {
+  width: 200px; height: 266px; display: flex; align-items: center; justify-content: center;
+  font-size: 3rem; color: var(--text-muted); opacity: 0.3;
+}
+.edit-cover-actions {
+  margin-top: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.edit-cover-url-row { display: flex; gap: 4px; }
+.edit-cover-url-row input {
+  flex: 1; padding: 5px 8px; font-size: 0.75rem;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.edit-field { margin-bottom: 14px; }
+.edit-field label {
+  display: block; font-size: 0.75rem; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; font-weight: 500;
+}
+.edit-field input, .edit-field textarea {
+  width: 100%; padding: 8px 12px; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: 0.85rem; font-family: 'Outfit', sans-serif;
+  transition: border-color 0.15s;
+}
+.edit-field input:focus, .edit-field textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.edit-field textarea { min-height: 100px; resize: vertical; line-height: 1.5; }
+.edit-rating { display: flex; gap: 2px; align-items: center; }
+.edit-rating .star {
+  font-size: 1.4rem; cursor: pointer; transition: color 0.1s, transform 0.1s;
+  user-select: none;
+}
+.edit-rating .star:hover { transform: scale(1.2); }
+.edit-rating .star.filled { color: var(--yellow); }
+.edit-rating .star.empty { color: var(--text-muted); }
+.edit-modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;
+  padding-top: 14px; border-top: 1px solid var(--border);
+}
+.edit-modal-info {
+  font-size: 0.75rem; color: var(--text-muted);
+  display: flex; gap: 12px; margin-top: 6px;
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
   .header { flex-direction: column; gap: 12px; text-align: center; }
@@ -369,6 +535,10 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
   .systems-grid { grid-template-columns: 1fr; }
   .config-bar { flex-direction: column; }
   .modal { min-width: auto; margin: 16px; }
+  .edit-modal { min-width: auto; }
+  .edit-modal-grid { grid-template-columns: 1fr; }
+  .browse-card { width: 130px; min-width: 130px; }
+  .browse-card-img { width: 130px; height: 173px; }
 }
 
 /* ─── Footer ─── */
@@ -395,6 +565,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
 </head>
 <body>
 <div class="app" id="app"></div>
+<input type="file" id="biosFileInput" style="display:none" accept="*/*">
 
 <script>
 const API = window.location.origin + '/api';
@@ -436,6 +607,25 @@ const state = {
   ssUser: '',
   ssDevId: '',
   ssConfigured: false,
+  // Browse mode
+  browseFilter: '',
+  browseSystemFilter: 'all',
+  browseExpandedSystems: {},
+  // Metadata edit modal
+  editModal: null,
+  editSaving: false,
+  // Knowledge Base
+  kbFilter: '',
+  kbCategoryFilter: 'all',
+  kbEntries: {},
+  // Auto-fix in-progress tracking keyed "system/filename"
+  fixing: {},
+  // Bug report modal
+  bugReport: { open: false, title: '', description: '', snapshot: null, loading: false },
+  // Update-available banner
+  updateAvailable: null,
+  // Session-local submitted reports (mirrors /api/kb/reports, reset on reload)
+  userReports: [],
 };
 
 // ─── API Helpers ─────────────────────────────────────────────────────────────
@@ -482,6 +672,169 @@ async function init() {
   }
   state.loading = false;
   render();
+  loadKB();
+  checkForUpdates();
+  loadUserReports();
+}
+
+async function loadKB() {
+  const r = await api('/kb');
+  if (r.entries) { state.kbEntries = r.entries; render(); }
+}
+
+async function checkForUpdates() {
+  try {
+    const r = await api('/version/check');
+    if (r.has_update && r.latest && r.release_url) {
+      state.updateAvailable = { latest: r.latest, url: r.release_url, notes: r.release_notes_short || '' };
+      render();
+    }
+  } catch (_) { /* silently ignore — user may be offline */ }
+}
+
+async function loadUserReports() {
+  const r = await api('/kb/reports');
+  if (r.reports) { state.userReports = r.reports; }
+}
+
+async function openBugReport(prefillTitle = '') {
+  state.bugReport = { open: true, title: prefillTitle, description: '', snapshot: null, loading: true };
+  render();
+  const snap = await api('/diagnostics/snapshot');
+  state.bugReport.snapshot = snap.error ? null : snap;
+  state.bugReport.loading = false;
+  render();
+}
+
+function closeBugReport() {
+  state.bugReport = { open: false, title: '', description: '', snapshot: null, loading: false };
+  render();
+}
+
+function buildGithubIssueBody(snapshot, title, desc) {
+  const env = snapshot?.env || {};
+  const scan = snapshot?.scan || {};
+  const diagByType = snapshot?.diagnostics_by_type || {};
+  const logs = snapshot?.recent_logs || [];
+
+  const diagLines = Object.entries(diagByType)
+    .map(([k, v]) => `| \`${k}\` | ${v.severity} | ${v.count} | ${v.auto_fix ? 'Yes' : 'No'} | ${v.sample_files.join(', ')} |`)
+    .join('\n');
+  const diagTable = Object.keys(diagByType).length
+    ? `| Type | Severity | Count | Auto-Fix | Sample Files |\n|------|----------|-------|----------|--------------|\n${diagLines}`
+    : '_No diagnostic issues recorded._';
+
+  const statsStr = scan.stats && Object.keys(scan.stats).length
+    ? Object.entries(scan.stats).map(([k, v]) => `- **${k}**: ${v}`).join('\n')
+    : '_No scan data._';
+
+  const logsBlock = logs.length
+    ? '```\n' + logs.join('\n') + '\n```'
+    : '_No recent log entries._';
+
+  return [
+    '## Description',
+    desc || '_Please describe your issue here._',
+    '',
+    '## Environment',
+    `- **App version**: ${env.app_version || 'unknown'}`,
+    `- **Python**: ${env.python_version || 'unknown'}`,
+    `- **Platform**: ${env.platform || 'unknown'}`,
+    `- **py7zr available**: ${env.py7zr_available}`,
+    `- **Share accessible**: ${env.share_accessible}`,
+    '',
+    '## Scan Stats',
+    `- **Last scan**: ${scan.last_scan || 'never'}`,
+    statsStr,
+    '',
+    '## Diagnostic Issues',
+    diagTable,
+    '',
+    '## Recent Logs (last 50 lines)',
+    logsBlock,
+    '',
+    '---',
+    `_Generated by Recalbox ROM Manager v${env.app_version || 'unknown'}_`,
+  ].join('\n');
+}
+
+async function submitBugReport() {
+  const { title, description, snapshot } = state.bugReport;
+  const safeTitle = title.trim() || 'Unknown issue';
+  const body = buildGithubIssueBody(snapshot, safeTitle, description);
+  const issueUrl = 'https://github.com/crs2007/recalbox-manager/issues/new'
+    + '?title=' + encodeURIComponent(safeTitle)
+    + '&body=' + encodeURIComponent(body);
+  // Log report to session store (best-effort, non-blocking)
+  api('/kb/report', { method: 'POST', body: { title: safeTitle } })
+    .then(r => { if (r.ok) loadUserReports(); });
+  window.open(issueUrl, '_blank', 'noopener,noreferrer');
+  closeBugReport();
+  toast('Opening GitHub — paste any extra details into the issue form', 'success');
+}
+
+async function copyBugReport() {
+  const { title, description, snapshot } = state.bugReport;
+  const safeTitle = title.trim() || 'Unknown issue';
+  const body = buildGithubIssueBody(snapshot, safeTitle, description);
+  try {
+    await navigator.clipboard.writeText('# ' + safeTitle + '\n\n' + body);
+    toast('Copied to clipboard', 'success');
+  } catch (_) {
+    toast('Clipboard copy failed — use "Open GitHub Issue" instead', 'error');
+  }
+}
+
+function renderBugReportModal() {
+  const br = state.bugReport;
+  if (!br.open) return '';
+
+  const snap = br.snapshot;
+  const env = snap?.env || {};
+  const diagByType = snap?.diagnostics_by_type || {};
+  const diagCount = Object.values(diagByType).reduce((s, v) => s + v.count, 0);
+
+  const snapPreview = br.loading
+    ? `<p style="color:var(--text-dim);font-size:0.82rem;margin-top:8px">⟳ Collecting diagnostic data…</p>`
+    : snap
+      ? `<details style="margin-top:12px">
+          <summary style="cursor:pointer;font-size:0.82rem;color:var(--text-dim);user-select:none">▶ Collected Data Preview (${diagCount} diagnostic findings)</summary>
+          <div style="margin-top:8px;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:0.78rem;font-family:'JetBrains Mono',monospace;white-space:pre-wrap;max-height:200px;overflow-y:auto;color:var(--text-dim)">App v${escHtml(env.app_version||'?')} · Python ${escHtml((env.python_version||'?').split(' ')[0])} · ${escHtml(env.platform||'?')}
+py7zr: ${env.py7zr_available} · Share: ${env.share_accessible}
+Last scan: ${escHtml(snap.scan?.last_scan||'never')}
+Diagnostics: ${diagCount} issues across ${Object.keys(diagByType).length} type(s)
+${Object.entries(diagByType).map(([k,v])=>`  ${k}: ${v.count} (${v.severity})`).join('\n')}</div>
+        </details>`
+      : `<p style="color:var(--text-dim);font-size:0.82rem;margin-top:8px">⚠ Could not collect diagnostic data (run a scan first to include stats)</p>`;
+
+  return `
+    <div class="modal-overlay" onclick="if(event.target===this)closeBugReport()">
+      <div class="modal" style="max-width:560px;width:100%">
+        <h3 style="margin-bottom:4px">⚠ Report Issue</h3>
+        <p style="font-size:0.82rem;color:var(--text-dim);margin-bottom:16px">
+          Opens a pre-filled GitHub issue with diagnostic data attached. You'll need a GitHub account to submit.
+        </p>
+        <label style="display:block;margin-bottom:4px;font-size:0.82rem;color:var(--text-dim)">Issue title</label>
+        <input type="text" id="bugReportTitle" value="${escHtml(br.title)}"
+          placeholder="Briefly describe the problem…"
+          style="width:100%;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;margin-bottom:12px;box-sizing:border-box"
+          oninput="state.bugReport.title=this.value" />
+        <label style="display:block;margin-bottom:4px;font-size:0.82rem;color:var(--text-dim)">Additional details (optional)</label>
+        <textarea id="bugReportDesc"
+          placeholder="Steps to reproduce, what you expected, what happened…"
+          style="width:100%;height:90px;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;resize:vertical;font-family:'Outfit',sans-serif;box-sizing:border-box"
+          oninput="state.bugReport.description=this.value">${escHtml(br.description)}</textarea>
+        ${snapPreview}
+        <div class="modal-actions" style="margin-top:16px">
+          <button class="btn" onclick="closeBugReport()">Cancel</button>
+          <button class="btn" onclick="copyBugReport()" ${br.loading ? 'disabled' : ''}>📋 Copy to Clipboard</button>
+          <button class="btn btn-primary" onclick="submitBugReport()" ${br.loading ? 'disabled' : ''}>
+            ${br.loading ? '⟳ Loading…' : '⚠ Open GitHub Issue'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 async function updateConfig(sharePath) {
@@ -495,8 +848,14 @@ async function startScan() {
   toast('Scanning ROMs... this may take a while for thousands of files', 'info');
   const r = await api('/scan', { method: 'POST' });
   state.scanning = false;
-  if (r.error) { toast(r.error, 'error'); render(); return; }
+  if (r.error) {
+    const cfg = await api('/config');
+    if (!cfg.error) state.config = cfg;
+    toast(r.error, 'error'); render(); return;
+  }
   state.stats = r.stats; state.lastScan = r.last_scan;
+  // Clear browse cache so fresh data is loaded
+  Object.keys(browseRomsCache).forEach(k => delete browseRomsCache[k]);
   const sys = await api('/systems');
   if (!sys.error) state.systems = sys;
   const iss = await api('/issues');
@@ -513,6 +872,7 @@ async function startScan() {
   if (Array.isArray(missingDescs)) state.missingDescriptions = missingDescs;
   const cfg = await api('/config');
   if (!cfg.error) state.config = cfg;
+  loadKB();
   toast(`Scan complete! ${r.stats.total_files} files found`, 'success');
   render();
 }
@@ -523,6 +883,8 @@ async function loadSystem(name) {
     state.selectedSystem = r;
     state.romPage = 0;
     state.romFilter = '';
+    // Invalidate browse cache so updated cover/metadata is reflected
+    delete browseRomsCache[name];
   }
   render();
 }
@@ -535,6 +897,8 @@ async function moveRom(filename, fromSystem, toSystem) {
     } else {
       toast(`Moved ${filename} → ${toSystem}`, 'success');
     }
+    state.diagnostics = state.diagnostics.filter(d => !(d.system === fromSystem && d.file === filename));
+    state.issues = state.issues.filter(i => !(i.current_system === fromSystem && i.file === filename));
     if (state.selectedSystem) loadSystem(state.selectedSystem.folder);
     state.modal = null;
   } else {
@@ -553,6 +917,26 @@ async function deleteRom(filename, system) {
     toast(r.error || 'Delete failed', 'error');
   }
   render();
+}
+
+async function repairGamelist(system) {
+  if (!confirm(`Repair gamelist.xml for "${system}"?\n\nA .bak backup will be created in the system folder before overwriting. Trailing junk after </gameList> will be stripped.`)) return;
+  const r = await api('/gamelist/repair', { method: 'POST', body: { system } });
+  if (r.ok && r.repaired) {
+    toast(`Repaired ${system} — stripped ${r.trailing_bytes} bytes of trailing junk`, 'success');
+    // Clear browse cache for this system and refresh issues + stats
+    delete browseRomsCache[system];
+    const iss = await api('/issues');
+    if (!iss.error) state.issues = iss;
+    const st = await api('/status');
+    if (!st.error) { state.stats = st.stats; state.lastScan = st.last_scan; }
+    if (state.selectedSystem?.folder === system) loadSystem(system);
+    render();
+  } else if (r.ok && !r.repaired) {
+    toast(`${system} gamelist.xml is already valid`, 'info');
+  } else {
+    toast(`Repair failed: ${r.error || 'unknown'}${r.detail ? ' — ' + r.detail : ''}`, 'error');
+  }
 }
 
 async function searchRoms(q) {
@@ -606,6 +990,115 @@ async function fixAllZipContents() {
   }
 }
 
+async function fixGenerateCue(system, filename) {
+  const key = system + '/' + filename;
+  state.fixing[key] = true; render();
+  const r = await api('/fix/generate-cue', { method: 'POST', body: { system, filename } });
+  delete state.fixing[key];
+  if (r.ok) {
+    toast(`Generated ${r.created}`, 'success');
+    state.diagnostics = state.diagnostics.filter(
+      d => !(d.key === 'missing_cue' && d.file === filename && d.system === system)
+    );
+  } else {
+    toast(`CUE fix failed: ${r.detail || r.error || 'unknown error'}`, 'error');
+  }
+  render();
+}
+
+async function fixGenerateM3u(system, relatedFiles, gameName) {
+  const key = system + '/m3u/' + gameName;
+  state.fixing[key] = true; render();
+  const r = await api('/fix/generate-m3u', { method: 'POST', body: { system, files: relatedFiles, game_name: gameName } });
+  delete state.fixing[key];
+  if (r.ok) {
+    toast(`Generated ${r.created}`, 'success');
+    const fileSet = new Set(relatedFiles);
+    state.diagnostics = state.diagnostics.filter(
+      d => !(d.key === 'missing_m3u' && d.system === system && fileSet.has(d.file))
+    );
+  } else {
+    toast(`M3U fix failed: ${r.detail || r.error || 'unknown error'}`, 'error');
+  }
+  render();
+}
+
+async function fixStripSmcHeader(system, filename) {
+  const key = system + '/' + filename;
+  if (!confirm(`Strip the 512-byte copier header from "${filename}"?\n\nA backup (.smc.bak) will be created first.`)) return;
+  state.fixing[key] = true; render();
+  const r = await api('/fix/strip-smc-header', { method: 'POST', body: { system, filename } });
+  delete state.fixing[key];
+  if (r.ok) {
+    toast(`Header stripped from ${filename} (backup: ${r.backup})`, 'success');
+    state.diagnostics = state.diagnostics.filter(
+      d => !(d.key === 'smc_copier_header' && d.file === filename && d.system === system)
+    );
+  } else {
+    toast(`Strip failed: ${r.detail || r.error || 'unknown error'}`, 'error');
+  }
+  render();
+}
+
+async function fixRenameBios(system, actualName, expectedName) {
+  const r = await api('/fix/rename-bios', {
+    method: 'POST',
+    body: { system, actual_name: actualName, expected_name: expectedName },
+  });
+  if (r.ok) {
+    toast(`Renamed ${actualName} → ${expectedName}`, 'success');
+    const bios = await api('/bios');
+    if (!bios.error) state.biosStatus = bios;
+  } else {
+    toast(`Rename failed: ${r.detail || r.error || 'unknown error'}`, 'error');
+  }
+  render();
+}
+
+async function fixUploadBios(system, expectedFilename, file) {
+  const key = 'bios/' + system + '/' + expectedFilename;
+  state.fixing[key] = true;
+  render();
+
+  const fd = new FormData();
+  fd.append('system', system);
+  fd.append('expected_filename', expectedFilename);
+  fd.append('file', file, expectedFilename);
+
+  let r;
+  try {
+    // Must use raw fetch — api() hardcodes JSON content-type which breaks multipart
+    const resp = await fetch(API + '/fix/upload-bios', { method: 'POST', body: fd });
+    r = await resp.json();
+  } catch (e) {
+    delete state.fixing[key];
+    toast('Upload error: ' + e.message, 'error');
+    render();
+    return;
+  }
+
+  delete state.fixing[key];
+  if (r.ok) {
+    if (r.warning) {
+      toast(r.warning, 'warning');
+    } else {
+      const mdLabel = r.md5_match === null ? 'not checked' : (r.md5_match ? 'matches ✓' : 'differs');
+      toast(`Uploaded ${r.filename} — MD5 ${mdLabel}`, 'success');
+    }
+    const bios = await api('/bios');
+    if (!bios.error) state.biosStatus = bios;
+  } else {
+    toast('Upload failed: ' + (r.detail || r.error || 'unknown error'), 'error');
+  }
+  render();
+}
+
+function triggerBiosUpload(system, expectedFilename) {
+  window._biosUploadSystem = system;
+  window._biosUploadFilename = expectedFilename;
+  document.getElementById('biosFileInput').click();
+}
+
 async function loadMissingCovers() {
   const r = await api('/covers/missing');
   if (Array.isArray(r)) state.missingCovers = r;
@@ -624,7 +1117,7 @@ async function scrapeCover(filename, system, gameName) {
     if (r.gamelist_updated === false) {
       toast('Cover downloaded but failed to save to gamelist.xml — changes will be lost on next scan', 'error');
     } else {
-      toast('Cover saved for ' + filename, 'success');
+      toast('Cover saved for ' + filename + (r.source ? ' (via ' + r.source + ')' : ''), 'success');
       state.missingCovers = state.missingCovers.filter(m => !(m.name === filename && m.system === system));
     }
     // Reload system detail if open, and refresh missing covers list
@@ -638,9 +1131,11 @@ async function scrapeCover(filename, system, gameName) {
       no_devid: 'ScreenScraper requires a developer ID — register at screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0 then add devid & devpass in the config bar',
       not_found: 'No cover found for ' + filename,
       rate_limited: 'ScreenScraper rate limit reached — try again later',
-      timeout: 'ScreenScraper timed out',
+      timeout: 'Scrape source timed out',
       unsupported_system: 'This system is not supported by ScreenScraper',
       ss_down: 'ScreenScraper error' + (r.detail ? ': ' + r.detail : ' — check your connection'),
+      sega_fandom_down: 'Sega Fandom Wiki unavailable' + (r.detail ? ': ' + r.detail : ''),
+      no_sources: 'No scrape sources available for this system',
     };
     toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
   }
@@ -684,7 +1179,7 @@ async function scrapeDescription(filename, system, gameName) {
     if (r.gamelist_updated === false) {
       toast('Description fetched but failed to save to gamelist.xml — changes will be lost on next scan', 'error');
     } else {
-      toast('Description saved for ' + filename, 'success');
+      toast('Description saved for ' + filename + (r.source ? ' (via ' + r.source + ')' : ''), 'success');
       state.missingDescriptions = state.missingDescriptions.filter(m => !(m.name === filename && m.system === system));
     }
     if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
@@ -697,9 +1192,11 @@ async function scrapeDescription(filename, system, gameName) {
       no_devid: 'ScreenScraper requires a developer ID — register at screenscraper.fr/forumsujets.php?frub=12&amp;numpage=0 then add devid & devpass in the config bar',
       not_found: 'No description found for ' + filename,
       rate_limited: 'ScreenScraper rate limit reached — try again later',
-      timeout: 'ScreenScraper timed out',
+      timeout: 'Scrape source timed out',
       unsupported_system: 'This system is not supported by ScreenScraper',
       ss_down: 'ScreenScraper error' + (r.detail ? ': ' + r.detail : ' — check your connection'),
+      sega_fandom_down: 'Sega Fandom Wiki unavailable' + (r.detail ? ': ' + r.detail : ''),
+      no_sources: 'No scrape sources available for this system',
     };
     toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
   }
@@ -755,6 +1252,12 @@ function render() {
   const app = document.getElementById('app');
   const scrollY = window.scrollY;
   const innerScrolls = [...document.querySelectorAll('.rom-table-wrap')].map(el => el.scrollTop);
+  // Preserve browse scroll positions (vertical container + horizontal rows)
+  const browseContainerScroll = document.querySelector('.browse-container')?.scrollTop || 0;
+  const browseScrolls = {};
+  document.querySelectorAll('.browse-row-scroll').forEach(el => {
+    if (el.id) browseScrolls[el.id] = el.scrollLeft;
+  });
   app.innerHTML = `
     ${renderHeader()}
     ${renderConfig()}
@@ -764,7 +1267,9 @@ function render() {
     ${!state.scanning && state.stats ? renderContent() : ''}
     ${!state.stats && !state.scanning && !state.loading ? renderWelcome() : ''}
     ${state.loading ? renderLoading('Connecting to server...') : ''}
+    ${state.editModal ? renderEditModal() : ''}
     ${state.modal ? renderModal() : ''}
+    ${renderBugReportModal()}
     ${renderToasts()}
     ${renderFooter()}
   `;
@@ -772,13 +1277,31 @@ function render() {
   document.querySelectorAll('.rom-table-wrap').forEach((el, i) => {
     if (innerScrolls[i] != null) el.scrollTop = innerScrolls[i];
   });
+  // Restore browse scroll positions
+  const browseContainer = document.querySelector('.browse-container');
+  if (browseContainer) browseContainer.scrollTop = browseContainerScroll;
+  Object.entries(browseScrolls).forEach(([id, left]) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollLeft = left;
+  });
   bindEvents();
+  // Set up browse lazy loading and scroll buttons
+  if (state.activeTab === 'browse') {
+    setupBrowseObserver();
+    bindBrowseScrollButtons();
+  }
 }
 
 function renderHeader() {
+  const updateBanner = state.updateAvailable
+    ? `<a href="${escHtml(state.updateAvailable.url)}" target="_blank" rel="noopener"
+         style="font-size:0.75rem;color:var(--yellow);border:1px solid var(--yellow);padding:3px 8px;border-radius:4px;text-decoration:none;white-space:nowrap"
+         title="${escHtml(state.updateAvailable.notes || 'New version available')}">↑ Update: v${escHtml(state.updateAvailable.latest)}</a>`
+    : '';
   return `<div class="header">
     <h1>⬡ Recalbox ROM Manager <span>${state.config?.version ? 'v' + state.config.version : ''}</span></h1>
     <div class="header-actions">
+      ${updateBanner}
       ${state.lastScan ? `<span style="font-size:0.75rem;color:var(--text-dim)">Last scan: ${new Date(state.lastScan).toLocaleString()}</span>` : ''}
       <button class="btn btn-primary" onclick="startScan()" ${state.scanning ? 'disabled' : ''}>
         ${state.scanning ? '⟳ Scanning...' : '⟳ Scan ROMs'}
@@ -789,6 +1312,7 @@ function renderHeader() {
 
 function renderConfig() {
   const ok = state.config.accessible;
+  const py7zMissing = state.config.py7zr_available === false;
   return `<div class="config-bar" style="flex-direction:column;align-items:stretch">
     <div style="display:flex;gap:10px;align-items:center">
       <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Share Path:</span>
@@ -800,6 +1324,10 @@ function renderConfig() {
         🖼 ScreenScraper ${state.ssConfigured ? '<span style="color:var(--green)">●</span>' : '<span style="color:var(--text-muted)">○</span>'}
       </button>
     </div>
+    ${py7zMissing ? `<div style="margin-top:8px;padding:10px 14px;background:#7c2d12;color:#fed7aa;border:1px solid #b45309;border-radius:6px;font-size:0.85rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:1.1rem">⚠</span>
+      <span style="flex:1;min-width:300px"><strong>py7zr not installed</strong> — .7z archives cannot be inspected, so wrong-content issues inside .7z files are silently skipped during scans. Run <code style="background:#000;padding:2px 6px;border-radius:3px">pip install py7zr</code> then restart the server.</span>
+    </div>` : ''}
     ${state.showSsConfig ? `<div class="ss-config-panel">
       <span style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap">Username:</span>
       <input type="text" id="ssUser" value="${escHtml(state.ssUser)}" placeholder="your screenscraper.fr username" />
@@ -821,26 +1349,28 @@ function renderConfig() {
 function renderStats() {
   const s = state.stats;
   return `<div class="stats-grid">
-    <div class="stat-card"><div class="stat-value">${s.total_systems}</div><div class="stat-label">Systems</div></div>
-    <div class="stat-card"><div class="stat-value">${s.total_files.toLocaleString()}</div><div class="stat-label">Total ROMs</div></div>
+    <div class="stat-card clickable" data-goto-tab="systems"><div class="stat-value">${s.total_systems}</div><div class="stat-label">Systems</div></div>
+    <div class="stat-card clickable" data-goto-tab="browse"><div class="stat-value">${s.total_files.toLocaleString()}</div><div class="stat-label">Total ROMs</div></div>
     <div class="stat-card"><div class="stat-value">${s.total_size}</div><div class="stat-label">Total Size</div></div>
-    <div class="stat-card ${s.total_misplaced > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_misplaced}</div><div class="stat-label">Misplaced</div></div>
-    <div class="stat-card ${s.total_duplicates > 0 ? 'danger' : ''}"><div class="stat-value">${s.total_duplicates}</div><div class="stat-label">Duplicates</div></div>
-    <div class="stat-card ${s.total_issues > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_issues}</div><div class="stat-label">Total Issues</div></div>
-    <div class="stat-card ${(s.total_diagnostics||0) > 0 ? 'warning' : ''}"><div class="stat-value">${s.total_diagnostics||0}</div><div class="stat-label">Diagnostics</div></div>
-    <div class="stat-card" style="border-color:var(--green)"><div class="stat-value" style="color:var(--green)">${(s.total_with_covers||0).toLocaleString()}</div><div class="stat-label">With Covers</div></div>
-    <div class="stat-card ${(s.total_missing_covers||0) > 0 ? 'warning' : ''}"><div class="stat-value">${(s.total_missing_covers||0).toLocaleString()}</div><div class="stat-label">Missing Covers</div></div>
-    <div class="stat-card" style="border-color:var(--cyan)"><div class="stat-value" style="color:var(--cyan)">${(s.total_with_descriptions||0).toLocaleString()}</div><div class="stat-label">With Descriptions</div></div>
-    <div class="stat-card ${(s.total_missing_descriptions||0) > 0 ? 'warning' : ''}"><div class="stat-value">${(s.total_missing_descriptions||0).toLocaleString()}</div><div class="stat-label">Missing Descriptions</div></div>
+    <div class="stat-card clickable ${s.total_misplaced > 0 ? 'warning' : ''}" data-goto-tab="issues"><div class="stat-value">${s.total_misplaced}</div><div class="stat-label">Misplaced</div></div>
+    <div class="stat-card clickable ${s.total_duplicates > 0 ? 'danger' : ''}" data-goto-tab="duplicates"><div class="stat-value">${s.total_duplicates}</div><div class="stat-label">Duplicates</div></div>
+    <div class="stat-card clickable ${s.total_issues > 0 ? 'warning' : ''}" data-goto-tab="issues"><div class="stat-value">${s.total_issues}</div><div class="stat-label">Total Issues</div></div>
+    <div class="stat-card clickable ${(s.total_diagnostics||0) > 0 ? 'warning' : ''}" data-goto-tab="diagnostics"><div class="stat-value">${s.total_diagnostics||0}</div><div class="stat-label">Diagnostics</div></div>
+    <div class="stat-card clickable" style="border-color:var(--green)" data-goto-tab="covers"><div class="stat-value" style="color:var(--green)">${(s.total_with_covers||0).toLocaleString()}</div><div class="stat-label">With Covers</div></div>
+    <div class="stat-card clickable ${(s.total_missing_covers||0) > 0 ? 'warning' : ''}" data-goto-tab="covers"><div class="stat-value">${(s.total_missing_covers||0).toLocaleString()}</div><div class="stat-label">Missing Covers</div></div>
+    <div class="stat-card clickable" style="border-color:var(--cyan)" data-goto-tab="descriptions"><div class="stat-value" style="color:var(--cyan)">${(s.total_with_descriptions||0).toLocaleString()}</div><div class="stat-label">With Descriptions</div></div>
+    <div class="stat-card clickable ${(s.total_missing_descriptions||0) > 0 ? 'warning' : ''}" data-goto-tab="descriptions"><div class="stat-value">${(s.total_missing_descriptions||0).toLocaleString()}</div><div class="stat-label">Missing Descriptions</div></div>
   </div>`;
 }
 
 function renderTabs() {
   const tabs = [
     { id: 'systems', label: 'Systems' },
+    { id: 'browse', label: 'Browse' },
     { id: 'issues', label: 'Issues', badge: state.issues.filter(i => i.type === 'misplaced').length },
     { id: 'duplicates', label: 'Duplicates', badge: state.duplicates.length },
-    { id: 'diagnostics', label: 'Diagnostics', badge: state.diagnostics.length },
+    { id: 'diagnostics', label: 'Diagnostics', badge: state.diagnostics.length, warnBadge: state.diagnostics.filter(d => d.key === 'wrong_zip_contents').length },
+    { id: 'kb', label: 'Knowledge Base' },
     { id: 'covers', label: 'Missing Covers', badge: state.missingCovers.length },
     { id: 'descriptions', label: 'Missing Descriptions', badge: state.missingDescriptions.length },
     { id: 'search', label: 'Search' },
@@ -848,7 +1378,7 @@ function renderTabs() {
   return `<div class="tabs">
     ${tabs.map(t => `
       <button class="tab ${state.activeTab === t.id ? 'active' : ''}" data-tab="${t.id}">
-        ${t.label}${t.badge ? `<span class="badge">${t.badge}</span>` : ''}
+        ${t.label}${t.badge ? `<span class="badge">${t.badge}</span>` : ''}${t.warnBadge ? `<span class="badge" style="background:#b45309;color:#fff;margin-left:3px" title="${t.warnBadge} archive(s) contain files for wrong system">⚠ ${t.warnBadge}</span>` : ''}
       </button>
     `).join('')}
   </div>`;
@@ -858,9 +1388,11 @@ function renderContent() {
   if (state.selectedSystem) return renderSystemDetail();
   switch (state.activeTab) {
     case 'systems': return renderSystems();
+    case 'browse': return renderBrowse();
     case 'issues': return renderIssues();
     case 'duplicates': return renderDuplicates();
     case 'diagnostics': return renderDiagnostics();
+    case 'kb': return renderKB();
     case 'covers': return renderMissingCovers();
     case 'descriptions': return renderMissingDescriptions();
     case 'search': return renderSearch();
@@ -972,6 +1504,7 @@ function renderSystemDetail() {
               </td>
               <td style="text-align:center">${descCell}</td>
               <td>
+                ${isRomFile ? `<button class="btn btn-sm" onclick='showEditModal(${JSON.stringify(r).replace(/\x27/g,"&#39;")}, "${escJs(s.folder)}")' title="Edit metadata">✏️</button>` : ''}
                 ${r.suggested_systems?.length ? `<button class="btn btn-sm btn-success" onclick='showMoveModal(${JSON.stringify(r).replace(/'/g,"&#39;")})'>Move →</button>` : ''}
                 ${isRomFile ? `<button class="btn btn-sm" onclick="scrapeCover('${escJs(r.name)}','${escJs(s.folder)}','${escJs(r.game_name||'')}')"
                   ${isScraping ? 'disabled' : ''} title="${r.has_cover ? 'Re-scrape cover' : 'Fetch cover art'}">
@@ -993,7 +1526,7 @@ function renderSystemDetail() {
 }
 
 function renderIssues() {
-  const filters = ['all', 'misplaced', 'duplicate', 'unknown_system', 'permission_error'];
+  const filters = ['all', 'misplaced', 'duplicate', 'unknown_system', 'permission_error', 'corrupted_gamelist'];
   let issues = state.issues;
   if (state.issueFilter !== 'all') issues = issues.filter(i => i.type === state.issueFilter);
 
@@ -1048,6 +1581,23 @@ function renderIssues() {
             <div class="issue-desc">Could not read this folder over the network share. Check that the SMB share is accessible and you have read permissions on <code>\\\\RECALBOX\\share\\roms\\${escHtml(i.system)}</code>.</div>
           </div>
         </div>`;
+      if (i.type === 'corrupted_gamelist') return `
+        <div class="issue-row">
+          <div class="issue-icon">🧩</div>
+          <div class="issue-details">
+            <div class="issue-file">Corrupted gamelist.xml — <strong>${escHtml(i.system)}</strong></div>
+            <div class="issue-desc">
+              XML parse error: <code>${escHtml(i.error || 'unknown')}</code>.
+              ${i.recovered_entries ? `Recovered <strong>${i.recovered_entries}</strong> entries from the file despite the corruption.` : 'No entries could be recovered — all metadata for this system is currently invisible.'}
+              ${i.recoverable ? ' This looks auto-repairable (trailing junk after <code>&lt;/gameList&gt;</code>).' : ''}
+            </div>
+          </div>
+          <div class="issue-actions">
+            ${i.recoverable
+              ? `<button class="btn btn-sm btn-success" onclick="repairGamelist('${escJs(i.system)}')" title="Backup as .bak and strip trailing junk">🔧 Repair</button>`
+              : `<button class="btn btn-sm" onclick="repairGamelist('${escJs(i.system)}')" title="Attempt repair anyway">🔧 Try repair</button>`}
+          </div>
+        </div>`;
       return `<div class="issue-row">
         <div class="issue-icon">❓</div>
         <div class="issue-details"><div class="issue-desc">${escHtml(JSON.stringify(i))}</div></div>
@@ -1078,6 +1628,8 @@ function renderDuplicates() {
 const DIAG_SOLUTIONS = {
   missing_cue: {
     title: 'Missing CUE file',
+    severity: 'critical',
+    auto_fix: true,
     description: 'CD-ROM games need a .cue file describing the disc track layout. Without it the emulator cannot read the disc.',
     steps: [
       'Create a text file named exactly like the .bin but with .cue extension (same folder).',
@@ -1088,6 +1640,8 @@ const DIAG_SOLUTIONS = {
   },
   missing_m3u: {
     title: 'Multi-disc game needs .m3u playlist',
+    severity: 'warning',
+    auto_fix: true,
     description: 'Games on multiple discs require an .m3u playlist so the emulator knows the disc order.',
     steps: [
       'Create a plain-text file named after the game with .m3u extension in the same system folder.',
@@ -1098,6 +1652,8 @@ const DIAG_SOLUTIONS = {
   },
   broken_m3u: {
     title: 'M3U playlist references missing file(s)',
+    severity: 'warning',
+    auto_fix: false,
     description: 'The .m3u playlist lists disc files that do not exist in the same folder.',
     steps: [
       'Open the .m3u file in a text editor and check each line.',
@@ -1108,6 +1664,8 @@ const DIAG_SOLUTIONS = {
   },
   empty_file: {
     title: 'File is empty or too small',
+    severity: 'critical',
+    auto_fix: false,
     description: 'The ROM file is 0 bytes or smaller than a valid ROM could ever be — likely a corrupt or incomplete download.',
     steps: [
       'Delete the file and re-download from a reliable source.',
@@ -1117,6 +1675,8 @@ const DIAG_SOLUTIONS = {
   },
   likely_overdump: {
     title: 'ROM appears to be an overdump',
+    severity: 'info',
+    auto_fix: false,
     description: 'The file ends with a large block of 0xFF or 0x00 bytes — the hallmark of a bad dump with padding.',
     steps: [
       'The ROM may still work — some emulators handle overdumps gracefully.',
@@ -1127,6 +1687,8 @@ const DIAG_SOLUTIONS = {
   },
   corrupt_archive: {
     title: 'ZIP archive is corrupt or unreadable',
+    severity: 'critical',
+    auto_fix: false,
     description: 'The archive fails integrity checks. The emulator cannot extract and load the ROM.',
     steps: [
       'Try extracting the archive on your PC to confirm it is readable.',
@@ -1137,6 +1699,8 @@ const DIAG_SOLUTIONS = {
   },
   wrong_zip_contents: {
     title: 'ZIP contains files for wrong system',
+    severity: 'warning',
+    auto_fix: true,
     description: "The archive is valid and .zip/.7z is accepted here, but the files inside belong to a different system. The emulator opens the archive and finds nothing it can use.",
     steps: [
       'Open the archive on your PC and check what files are inside.',
@@ -1146,6 +1710,42 @@ const DIAG_SOLUTIONS = {
     ],
     search_query: 'recalbox rom wrong system zip contents',
   },
+  smc_copier_header: {
+    title: 'SNES ROM has legacy copier header',
+    severity: 'warning',
+    auto_fix: true,
+    description: 'This .smc file contains a 512-byte copier header added by old backup hardware. Many libretro SNES cores reject it, causing a black screen or crash on load.',
+    steps: [
+      'Rename the file from .smc to .sfc — some cores auto-detect and skip the header.',
+      'If renaming does not fix it, strip the header using: dd if=game.smc of=game.sfc bs=512 skip=1',
+      'Alternatively, find a clean No-Intro dump (.sfc) which never contains copier headers.',
+    ],
+    search_query: 'snes smc copier header strip recalbox',
+  },
+  invalid_nes_header: {
+    title: 'NES ROM has invalid iNES header',
+    severity: 'warning',
+    auto_fix: false,
+    description: 'This .nes file does not start with the expected iNES magic bytes (NES\\x1a). It may be a corrupt download, a renamed non-NES file, or a legacy bad dump.',
+    steps: [
+      'Re-download the ROM from a No-Intro verified source.',
+      'Verify the file is actually a NES ROM and not a file with a renamed extension.',
+      'If you have a hex editor, check that the first 4 bytes are: 4E 45 53 1A',
+    ],
+    search_query: 'nes ines header invalid bad dump no-intro',
+  },
+  n64_non_canonical: {
+    title: 'N64 ROM is in non-canonical byte order',
+    severity: 'info',
+    auto_fix: false,
+    description: 'This file uses a byte-swapped (.v64) or little-endian (.n64) format. The canonical N64 format is big-endian (.z64). Some Recalbox cores may fail or perform slower with these formats.',
+    steps: [
+      'Convert to .z64 (big-endian) using Tool64 or a similar N64 ROM conversion utility.',
+      'Rename the output file to .z64 after conversion.',
+      'If the game works fine as-is, no action is required — this is an advisory warning.',
+    ],
+    search_query: 'n64 v64 z64 byte swap convert tool64',
+  },
 };
 
 function diagTitle(key) {
@@ -1153,34 +1753,70 @@ function diagTitle(key) {
 }
 
 function renderDiagnostics() {
-  const diagTypes = ['all', 'missing_cue', 'missing_m3u', 'broken_m3u', 'empty_file', 'likely_overdump', 'corrupt_archive', 'wrong_zip_contents'];
+  const diagTypes = ['all', 'missing_cue', 'missing_m3u', 'broken_m3u', 'empty_file', 'likely_overdump', 'corrupt_archive', 'wrong_zip_contents', 'smc_copier_header', 'invalid_nes_header', 'n64_non_canonical'];
   let diags = state.diagnostics;
   if (state.diagFilter !== 'all') diags = diags.filter(d => d.key === state.diagFilter);
 
-  // BIOS status panel
+  const SEV_COLORS = { critical: 'var(--red)', warning: 'var(--yellow)', info: 'var(--cyan)' };
+
+  // BIOS status panel — sorted by priority, with banner and search shortcut
   const biosEntries = Object.entries(state.biosStatus);
-  const biosPanel = biosEntries.length ? `
+  const allBiosFiles = biosEntries.flatMap(([sys, info]) =>
+    info.bios_files.map(f => ({ sys, displayName: info.display_name, ...f }))
+  );
+  const biosSortOrder = f => f.status === 'missing' && f.required ? 0 : f.status === 'wrong_version' ? 1 : f.status === 'wrong_case' ? 2 : f.status === 'missing' ? 3 : 4;
+  allBiosFiles.sort((a, b) => biosSortOrder(a) - biosSortOrder(b));
+  const reqMissing = allBiosFiles.filter(f => f.status === 'missing' && f.required).length;
+  const optMissing = allBiosFiles.filter(f => f.status === 'missing' && !f.required).length;
+  const wrongCount = allBiosFiles.filter(f => f.status === 'wrong_version' || f.status === 'wrong_case').length;
+  const biosBannerParts = [];
+  if (reqMissing) biosBannerParts.push(`${reqMissing} required BIOS file${reqMissing > 1 ? 's' : ''} missing`);
+  if (wrongCount) biosBannerParts.push(`${wrongCount} wrong version/case`);
+  if (optMissing) biosBannerParts.push(`${optMissing} optional missing`);
+  const biosBanner = biosBannerParts.length ? `
+    <div style="background:rgba(255,180,0,0.07);border:1px solid rgba(255,180,0,0.25);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;gap:12px;align-items:flex-start">
+      <span style="font-size:1.1rem;line-height:1.2">⚠</span>
+      <div>
+        <div style="font-size:0.85rem;font-weight:600;color:var(--yellow);margin-bottom:4px">${biosBannerParts.join(' · ')}</div>
+        <div style="font-size:0.8rem;color:var(--text-dim)">BIOS files are firmware from original hardware. Find them from your own game backups or a trusted emulation community, then click <strong style="color:var(--text-muted)">⚡ Select &amp; Upload</strong> next to each file to install it on Recalbox.</div>
+      </div>
+    </div>` : '';
+  const biosPanel = allBiosFiles.length ? `
     <div style="margin-bottom:24px">
       <h3 style="font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:12px">⚙ BIOS Status</h3>
+      ${biosBanner}
       <div class="rom-table-wrap">
         <table class="bios-table">
-          <thead><tr><th>System</th><th>File</th><th>Status</th><th>Description</th></tr></thead>
+          <thead><tr><th>System</th><th>File</th><th>Status</th><th>Description</th><th>Actions</th></tr></thead>
           <tbody>
-            ${biosEntries.flatMap(([sys, info]) =>
-              info.bios_files.map(f => `<tr>
-                <td style="color:var(--purple)">${escHtml(info.display_name)}</td>
-                <td class="rom-name">${escHtml(f.file)}</td>
-                <td>${
-                  f.status === 'ok' ? `<span class="bios-ok">✓ Present</span>` :
-                  f.status === 'missing' && f.required ? `<span class="bios-missing">✗ Missing</span>` :
-                  f.status === 'missing' ? `<span class="bios-optional">– Optional</span>` :
-                  f.status === 'wrong_version' ? `<span class="bios-wrong">⚠ Wrong version</span>` :
-                  f.status === 'wrong_case' ? `<span class="bios-wrong">⚠ Wrong filename case${f.actual_name ? ` (found: ${escHtml(f.actual_name)})` : ''}</span>` :
-                  `<span class="bios-optional">${escHtml(f.status)}</span>`
-                }</td>
-                <td style="color:var(--text-dim);font-size:0.8rem">${escHtml(f.desc)}${f.expected_md5 ? `<br><span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:var(--text-muted)">MD5: ${f.expected_md5}</span>` : ''}</td>
-              </tr>`)
-            ).join('')}
+            ${allBiosFiles.map(f => `<tr${f.status === 'ok' ? ' style="opacity:0.5"' : ''}>
+              <td style="color:var(--purple)">${escHtml(f.displayName)}</td>
+              <td class="rom-name">${escHtml(f.file)}</td>
+              <td>${
+                f.status === 'ok' ? `<span class="bios-ok">✓ Present</span>` :
+                f.status === 'missing' && f.required ? `<span class="bios-missing">✗ Missing</span>` :
+                f.status === 'missing' ? `<span class="bios-optional">– Optional</span>` :
+                f.status === 'wrong_version' ? `<span class="bios-wrong">⚠ Wrong version</span>` :
+                f.status === 'wrong_case' ? `<span class="bios-wrong">⚠ Wrong case${f.actual_name ? ` (found: ${escHtml(f.actual_name)})` : ''}</span>` :
+                `<span class="bios-optional">${escHtml(f.status)}</span>`
+              }</td>
+              <td style="color:var(--text-dim);font-size:0.8rem">${escHtml(f.desc)}${f.expected_md5 ? `<br><span style="font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:var(--text-muted)">MD5: ${f.expected_md5}</span>` : ''}</td>
+              <td style="white-space:nowrap">${
+                f.status === 'wrong_case' && f.actual_name
+                  ? `<button class="btn btn-sm btn-success" onclick="fixRenameBios('${escJs(f.sys)}','${escJs(f.actual_name)}','${escJs(f.file)}')">⚡ Fix Case</button>`
+                : (f.status === 'missing' || f.status === 'wrong_version')
+                  ? `<button class="btn btn-sm btn-success"
+                       onclick="triggerBiosUpload('${escJs(f.sys)}','${escJs(f.file)}')"
+                       ${state.fixing['bios/'+f.sys+'/'+f.file] ? 'disabled' : ''}>
+                       ${state.fixing['bios/'+f.sys+'/'+f.file] ? '⟳ Uploading…' : '⚡ Select &amp; Upload'}
+                     </button>
+                     <button class="btn btn-sm" style="margin-left:4px;border-color:var(--cyan);color:var(--cyan)"
+                       onclick="window.open('https://duckduckgo.com/?q=recalbox+${escJs(f.file)}+bios','_blank')" title="Search for this BIOS file online">
+                       🔍 Search
+                     </button>`
+                : ''
+              }</td>
+            </tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -1196,6 +1832,8 @@ function renderDiagnostics() {
         ${f === 'all' ? `All (${state.diagnostics.length})` : escHtml(diagTitle(f))}
       </button>`).join('')}
       ${wrongZipCount > 0 ? `<button class="btn btn-sm btn-success" style="margin-left:auto" onclick="fixAllZipContents()">⚡ Fix All Wrong ZIPs (${wrongZipCount})</button>` : ''}
+      <button class="btn btn-sm" onclick="openBugReport('Unknown diagnostic issue: ')"
+        style="${wrongZipCount > 0 ? '' : 'margin-left:auto;'}border-color:var(--yellow);color:var(--yellow);opacity:0.75">⚠ Report Issue</button>
     </div>
   `;
 
@@ -1207,15 +1845,49 @@ function renderDiagnostics() {
     const sol = DIAG_SOLUTIONS[d.key] || {};
     const isOpen = !!state.expandedDiag[idx];
     const gameName = d.file ? d.file.replace(/\.[^.]+$/, '') : '';
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent((sol.search_query||d.key)+' '+escHtml(gameName))}`;
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent((sol.search_query||d.key)+' '+gameName)}`;
+    const sev = sol.severity || 'info';
+    const sevColor = SEV_COLORS[sev] || 'var(--text-dim)';
+    const fixKey = (d.system||'') + '/' + (d.file||'');
+    const isFixing = !!state.fixing[fixKey];
+
+    // Auto-fix button for fixable types
+    let fixBtn = '';
+    if (d.key === 'missing_cue') {
+      fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"
+        onclick="event.stopPropagation();fixGenerateCue('${escJs(d.system||'')}','${escJs(d.file||'')}')"
+        ${isFixing ? 'disabled' : ''}>${isFixing ? '⟳ Fixing…' : '⚡ Auto-Fix'}</button>`;
+    } else if (d.key === 'missing_m3u') {
+      const relFiles = d.related_files && d.related_files.length ? d.related_files : [d.file||''];
+      const gname = gameName.replace(/\s*\(disc\s*\d+\)/i, '').trim();
+      fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"
+        onclick="event.stopPropagation();fixGenerateM3u('${escJs(d.system||'')}',${JSON.stringify(relFiles)},'${escJs(gname)}')"
+        ${isFixing ? 'disabled' : ''}>${isFixing ? '⟳ Fixing…' : '⚡ Auto-Fix'}</button>`;
+    } else if (d.key === 'smc_copier_header') {
+      fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"
+        onclick="event.stopPropagation();fixStripSmcHeader('${escJs(d.system||'')}','${escJs(d.file||'')}')"
+        ${isFixing ? 'disabled' : ''}>${isFixing ? '⟳ Fixing…' : '⚡ Strip Header'}</button>`;
+    } else if (d.key === 'wrong_zip_contents' && d.suggested_systems && d.suggested_systems.length > 0) {
+      const targetSys = d.suggested_systems[0];
+      fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"
+        onclick="event.stopPropagation();moveRom('${escJs(d.file||'')}','${escJs(d.system||'')}','${escJs(targetSys)}')"
+        ${isFixing ? 'disabled' : ''}>${isFixing ? '⟳ Moving…' : `⚡ Move → ${escHtml(targetSys)}`}</button>`;
+    }
+
+    const requestFixBtn = !sol.auto_fix
+      ? `<button class="btn btn-sm" style="margin-left:auto;flex-shrink:0;color:var(--yellow);border-color:var(--yellow);opacity:0.7;font-size:0.75rem"
+           onclick="event.stopPropagation();openBugReport('Auto-fix request: ${escJs(d.key||'')} in ${escJs(d.system||'')}')">✦ Request Fix</button>`
+      : '';
+
     return `
       <div class="diag-card">
         <div class="diag-card-header" onclick="state.expandedDiag[${idx}]=!state.expandedDiag[${idx}];render()">
-          <span style="font-size:1.1rem">⚕</span>
+          <span style="background:${sevColor}1a;color:${sevColor};border:1px solid ${sevColor}55;padding:2px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;white-space:nowrap;flex-shrink:0">${sev.toUpperCase()}</span>
           <span class="diag-title">${escHtml(sol.title||d.key)}</span>
           <span class="diag-file">${escHtml(d.file||'')}</span>
           <span class="diag-system">${escHtml(d.system||'')}</span>
-          <span style="color:var(--text-muted);margin-left:8px">${isOpen?'▲':'▼'}</span>
+          ${fixBtn || requestFixBtn}
+          <span style="color:var(--text-muted);flex-shrink:0">${isOpen?'▲':'▼'}</span>
         </div>
         ${isOpen ? `<div class="diag-card-body">
           <p>${escHtml(sol.description||d.description||'')}</p>
@@ -1225,7 +1897,7 @@ function renderDiagnostics() {
           ${d.key === 'wrong_zip_contents' ? `
             <p style="margin-top:10px;font-size:0.82rem;color:var(--text-dim)">Found inside: ${(d.inner_extensions||[]).map(e=>`<code>${escHtml(e)}</code>`).join(', ')}</p>
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-              ${(d.suggested_systems||[]).map(sys=>`<button class="btn btn-sm btn-success" onclick="moveRom('${escHtml(d.file)}','${escHtml(d.system)}','${escHtml(sys)}')">Move → ${escHtml(sys)}</button>`).join('')}
+              ${(d.suggested_systems||[]).map(sys=>`<button class="btn btn-sm btn-success" onclick="moveRom('${escJs(d.file||'')}','${escJs(d.system||'')}','${escJs(sys)}')">Move → ${escHtml(sys)}</button>`).join('')}
             </div>
           ` : ''}
           <a class="diag-search-link" href="${searchUrl}" target="_blank" rel="noopener">🔍 Search for solution online →</a>
@@ -1235,6 +1907,96 @@ function renderDiagnostics() {
   }).join('') : '<div class="empty-state" style="padding:30px"><p>No issues matching this filter.</p></div>';
 
   return biosPanel + filterBar + diagCards;
+}
+
+function renderKB() {
+  const entries = Object.entries(state.kbEntries);
+  if (!entries.length) {
+    return `<div class="empty-state"><div class="emoji">📚</div><p>Knowledge Base not loaded.</p>
+      <button class="btn btn-primary" onclick="loadKB()">Load KB</button></div>`;
+  }
+
+  const SEV_COLORS = { critical: 'var(--red)', warning: 'var(--yellow)', info: 'var(--cyan)' };
+  const SEV_LABELS = { critical: 'Critical', warning: 'Warning', info: 'Info' };
+  const CAT_LABELS = { diagnostic: 'ROM Diagnostics', bios: 'BIOS Issues', rom_issue: 'ROM Issues' };
+
+  const q = (state.kbFilter || '').toLowerCase();
+  const catFilter = state.kbCategoryFilter || 'all';
+
+  const filtered = entries.filter(([key, e]) => {
+    const matchesCat = catFilter === 'all' || e.category === catFilter;
+    const matchesSearch = !q ||
+      (e.title||'').toLowerCase().includes(q) ||
+      (e.description||'').toLowerCase().includes(q) ||
+      (e.steps||[]).some(s => s.toLowerCase().includes(q));
+    return matchesCat && matchesSearch;
+  });
+
+  const catButtons = [
+    { id: 'all', label: 'All' },
+    { id: 'diagnostic', label: 'ROM Diagnostics' },
+    { id: 'bios', label: 'BIOS Issues' },
+  ].map(c => `<button class="btn btn-sm ${catFilter===c.id?'btn-primary':''}"
+    onclick="state.kbCategoryFilter='${c.id}';render()">${c.label}</button>`).join('');
+
+  const cards = filtered.map(([key, e]) => {
+    const sev = e.severity || 'info';
+    const sevColor = SEV_COLORS[sev] || 'var(--text-dim)';
+    const sevLabel = SEV_LABELS[sev] || sev;
+    const catLabel = CAT_LABELS[e.category] || e.category || '';
+    const isOpen = !!state.expandedDiag['kb_' + key];
+    const searchUrl = e.search_query
+      ? `https://www.google.com/search?q=${encodeURIComponent(e.search_query)}`
+      : `https://www.google.com/search?q=${encodeURIComponent(e.title||key)}`;
+    return `
+      <div class="diag-card">
+        <div class="diag-card-header" onclick="state.expandedDiag['kb_${escJs(key)}']=!state.expandedDiag['kb_${escJs(key)}'];render()">
+          <span style="background:${sevColor}1a;color:${sevColor};border:1px solid ${sevColor}55;padding:2px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;white-space:nowrap;flex-shrink:0">${sevLabel}</span>
+          ${e.auto_fix ? `<span style="background:var(--green-dim,#0d2b1a);color:var(--green,#3fb950);border:1px solid #3fb95055;padding:2px 7px;border-radius:4px;font-size:0.7rem;font-weight:700;white-space:nowrap;flex-shrink:0">⚡ Auto-fixable</span>` : ''}
+          <span class="diag-title">${escHtml(e.title||key)}</span>
+          <code style="font-size:0.72rem;color:var(--text-muted);flex-shrink:0">${escHtml(key)}</code>
+          <span style="font-size:0.72rem;color:var(--text-dim);flex-shrink:0">${escHtml(catLabel)}</span>
+          <span style="color:var(--text-muted);margin-left:auto;flex-shrink:0">${isOpen?'▲':'▼'}</span>
+        </div>
+        ${isOpen ? `<div class="diag-card-body">
+          <p>${escHtml(e.description||'')}</p>
+          ${e.steps ? `<ol class="diag-steps">${e.steps.map(s => `<li>${s.includes('\n') ? escHtml(s.split('\n')[0]) + '<pre>' + escHtml(s.split('\n').slice(1).join('\n')) + '</pre>' : escHtml(s)}</li>`).join('')}</ol>` : ''}
+          <a class="diag-search-link" href="${searchUrl}" target="_blank" rel="noopener">🔍 Search online →</a>
+          <button class="btn btn-sm" style="margin-top:8px;color:var(--yellow);border-color:var(--yellow);opacity:0.7"
+            onclick="openBugReport('Issue with ${escJs(key)}: ')">My problem is different →</button>
+        </div>` : ''}
+      </div>`;
+  }).join('');
+
+  const sessionReports = state.userReports.length ? `
+    <div style="margin-top:20px">
+      <h4 style="font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:8px">Recently Reported by You (this session)</h4>
+      ${state.userReports.slice(0, 5).map(r => `
+        <div style="padding:8px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:0.82rem">${escHtml(r.title)}</span>
+          <span style="font-size:0.72rem;color:var(--text-muted)">${new Date(r.timestamp).toLocaleTimeString()}</span>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  return `
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+      <input type="text" value="${escHtml(state.kbFilter||'')}"
+        placeholder="Search KB — title, description, steps…"
+        style="flex:1;min-width:200px;padding:8px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem"
+        oninput="state.kbFilter=this.value;render()" />
+      ${catButtons}
+    </div>
+    <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:12px">${filtered.length} of ${entries.length} entries</p>
+    ${filtered.length ? cards : '<div class="empty-state"><p>No matching KB entries.</p></div>'}
+    <div style="margin-top:28px;padding:16px;border:1px dashed var(--border);border-radius:var(--radius);text-align:center">
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:10px">Don't see your issue type? Help improve this tool by reporting it.</p>
+      <button class="btn" onclick="openBugReport('New diagnostic: ')"
+        style="border-color:var(--yellow);color:var(--yellow)">⚠ Report Unknown Issue</button>
+    </div>
+    ${sessionReports}
+  `;
 }
 
 function renderMissingCovers() {
@@ -1389,6 +2151,382 @@ function renderSearch() {
   `;
 }
 
+// ─── Metadata Edit Modal ──────────────────────────────────────────────────────
+async function showEditModal(romJson, systemFolder) {
+  const rom = typeof romJson === 'string' ? JSON.parse(romJson) : romJson;
+  state.editModal = {
+    system: systemFolder,
+    filename: rom.name,
+    name: rom.game_name || '',
+    desc: '',
+    rating: '',
+    cover_url: rom.cover_url || '',
+    has_cover: rom.has_cover || false,
+    coverImageUrl: '',
+    size_human: rom.size_human || '',
+    loading: true,
+  };
+  state.editSaving = false;
+  render();
+  // Fetch full gamelist entry for description and rating
+  const gl = await api('/gamelist/' + systemFolder);
+  if (!gl.error) {
+    const stem = rom.name.replace(/\.[^.]+$/, '').toLowerCase();
+    const entry = gl[stem];
+    if (entry) {
+      state.editModal.desc = entry.desc || '';
+      state.editModal.name = state.editModal.name || entry.name || '';
+      if (entry.image_exists && entry.image) {
+        const imgBase = entry.image.replace(/\\/g, '/').split('/').pop();
+        state.editModal.cover_url = `/api/covers/image/${encodeURIComponent(systemFolder)}/${encodeURIComponent(imgBase)}`;
+        state.editModal.has_cover = true;
+      }
+    }
+  }
+  state.editModal.loading = false;
+  render();
+}
+
+function renderEditModal() {
+  const m = state.editModal;
+  if (!m) return '';
+  const ratingVal = parseFloat(m.rating) || 0;
+  return `<div class="modal-overlay" onclick="if(event.target===this){state.editModal=null;render()}">
+    <div class="modal edit-modal">
+      <h3 style="margin-bottom:4px">Edit Game Metadata</h3>
+      <div class="edit-modal-info">
+        <span>System: <strong>${escHtml(m.system)}</strong></span>
+        <span>File: <strong>${escHtml(m.filename)}</strong></span>
+        ${m.size_human ? `<span>Size: ${escHtml(m.size_human)}</span>` : ''}
+      </div>
+      ${m.loading ? '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading metadata...</div>' : `
+      <div class="edit-modal-grid">
+        <div>
+          <div class="edit-modal-cover">
+            ${m.has_cover && m.cover_url
+              ? `<img src="${escHtml(m.cover_url)}" alt="Cover art">`
+              : `<div class="edit-modal-cover-placeholder">🎮</div>`}
+          </div>
+          <div class="edit-cover-actions">
+            <div class="edit-cover-url-row">
+              <input type="text" id="editCoverUrl" placeholder="Image URL..." value="${escHtml(m.coverImageUrl)}" />
+              <button class="btn btn-sm btn-primary" onclick="editDownloadCover()" title="Download cover from URL">↓</button>
+            </div>
+            <button class="btn btn-sm" onclick="editScrapeCover()">🖼 Scrape Cover</button>
+          </div>
+        </div>
+        <div>
+          <div class="edit-field">
+            <label>Game Name</label>
+            <input type="text" id="editName" value="${escHtml(m.name)}" placeholder="Enter game name..." />
+          </div>
+          <div class="edit-field">
+            <label>Description</label>
+            <textarea id="editDesc" placeholder="Enter game description...">${escHtml(m.desc)}</textarea>
+          </div>
+          <div class="edit-field">
+            <label>Rating</label>
+            <div class="edit-rating">
+              ${renderStarRating(ratingVal)}
+              <span style="font-size:0.75rem;color:var(--text-muted);margin-left:8px">${ratingVal ? (ratingVal * 5).toFixed(1) + '/5' : 'Not rated'}</span>
+              ${ratingVal ? `<button class="btn btn-sm" onclick="state.editModal.rating='';render()" style="margin-left:4px;font-size:0.7rem">Clear</button>` : ''}
+            </div>
+          </div>
+          <button class="btn btn-sm" onclick="editScrapeDesc()" style="margin-bottom:8px">📝 Scrape Description</button>
+        </div>
+      </div>
+      <div class="edit-modal-footer">
+        <button class="btn" onclick="state.editModal=null;render()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveMetadata()" ${state.editSaving ? 'disabled' : ''}>
+          ${state.editSaving ? '⟳ Saving...' : '💾 Save Changes'}
+        </button>
+      </div>
+      `}
+    </div>
+  </div>`;
+}
+
+function renderStarRating(currentRating) {
+  const stars = [0.2, 0.4, 0.6, 0.8, 1.0];
+  return stars.map(val => {
+    const filled = currentRating >= val;
+    return `<span class="star ${filled ? 'filled' : 'empty'}" onclick="state.editModal.rating='${val}';render()">★</span>`;
+  }).join('');
+}
+
+async function saveMetadata() {
+  const m = state.editModal;
+  // Read current form values before save
+  const nameEl = document.getElementById('editName');
+  const descEl = document.getElementById('editDesc');
+  if (nameEl) m.name = nameEl.value;
+  if (descEl) m.desc = descEl.value;
+
+  state.editSaving = true; render();
+  const fields = {};
+  if (m.name) fields.name = m.name;
+  if (m.desc) fields.desc = m.desc;
+  if (m.rating) fields.rating = m.rating;
+  const r = await api('/gamelist/update', {
+    method: 'POST',
+    body: { system: m.system, filename: m.filename, ...fields }
+  });
+  state.editSaving = false;
+  if (r.ok) {
+    toast('Metadata saved', 'success');
+    // Update in-memory ROM data
+    if (state.selectedSystem && state.selectedSystem.folder === m.system) {
+      await loadSystem(m.system);
+    }
+    // Refresh systems summary
+    const sysResp = await api('/systems');
+    if (!sysResp.error) state.systems = sysResp;
+    state.editModal = null;
+  } else {
+    toast('Save failed: ' + (r.error || 'unknown'), 'error');
+  }
+  render();
+}
+
+async function editDownloadCover() {
+  const m = state.editModal;
+  const urlEl = document.getElementById('editCoverUrl');
+  if (urlEl) m.coverImageUrl = urlEl.value;
+  if (!m.coverImageUrl) { toast('Enter an image URL first', 'error'); return; }
+  toast('Downloading cover...', 'info');
+  const r = await api('/covers/download-url', {
+    method: 'POST',
+    body: { system: m.system, filename: m.filename, image_url: m.coverImageUrl }
+  });
+  if (r.ok) {
+    toast('Cover downloaded', 'success');
+    m.cover_url = r.cover_url;
+    m.has_cover = true;
+    m.coverImageUrl = '';
+    if (state.selectedSystem && state.selectedSystem.folder === m.system) {
+      await loadSystem(m.system);
+    }
+  } else {
+    toast('Download failed: ' + (r.detail || r.error || 'unknown'), 'error');
+  }
+  render();
+}
+
+async function editScrapeCover() {
+  const m = state.editModal;
+  toast('Scraping cover...', 'info');
+  const r = await api('/covers/scrape', {
+    method: 'POST',
+    body: { system: m.system, filename: m.filename, game_name: m.name }
+  });
+  if (r.ok) {
+    toast('Cover scraped from ' + (r.source || 'online'), 'success');
+    m.cover_url = r.cover_url;
+    m.has_cover = true;
+    if (state.selectedSystem && state.selectedSystem.folder === m.system) {
+      await loadSystem(m.system);
+    }
+  } else {
+    toast('Scrape failed: ' + (r.error || 'unknown'), 'error');
+  }
+  render();
+}
+
+async function editScrapeDesc() {
+  const m = state.editModal;
+  toast('Scraping description...', 'info');
+  const r = await api('/descriptions/scrape', {
+    method: 'POST',
+    body: { system: m.system, filename: m.filename, game_name: m.name }
+  });
+  if (r.ok) {
+    toast('Description scraped from ' + (r.source || 'online'), 'success');
+    m.desc = r.desc || '';
+    if (state.selectedSystem && state.selectedSystem.folder === m.system) {
+      await loadSystem(m.system);
+    }
+  } else {
+    toast('Scrape failed: ' + (r.error || 'unknown'), 'error');
+  }
+  render();
+}
+
+// ─── Netflix-Style Browse Mode ────────────────────────────────────────────────
+// Cache for loaded ROM data per system (populated on demand)
+const browseRomsCache = {};
+
+async function loadBrowseRoms(systemKey) {
+  if (browseRomsCache[systemKey]) return browseRomsCache[systemKey];
+  const r = await api('/systems/' + systemKey);
+  if (!r.error && r.roms) {
+    browseRomsCache[systemKey] = r.roms;
+    return r.roms;
+  }
+  return [];
+}
+
+function renderBrowse() {
+  const entries = Object.entries(state.systems)
+    .filter(([, s]) => (s.ok_count || 0) > 0)
+    .sort((a, b) => (b[1].ok_count || 0) - (a[1].ok_count || 0));
+
+  if (!entries.length) {
+    return '<div class="empty-state"><div class="emoji">🎬</div><p>No games found. Run a scan first.</p></div>';
+  }
+
+  const systemOptions = entries.map(([k, s]) => `<option value="${k}" ${state.browseSystemFilter===k?'selected':''}>${escHtml(s.name)} (${s.ok_count || 0})</option>`).join('');
+
+  let filtered = entries;
+  if (state.browseSystemFilter !== 'all') {
+    filtered = entries.filter(([k]) => k === state.browseSystemFilter);
+  }
+
+  // Trigger loading ROMs for the first 4 visible systems
+  filtered.slice(0, 4).forEach(([key]) => {
+    if (!browseRomsCache[key]) {
+      loadBrowseRoms(key).then(() => {
+        const rowEl = document.querySelector(`.browse-row[data-browse-system="${key}"]`);
+        if (rowEl) {
+          const sys = state.systems[key];
+          const tmpDiv = document.createElement('div');
+          tmpDiv.innerHTML = renderBrowseRow(key, sys);
+          rowEl.replaceWith(tmpDiv.firstElementChild);
+          bindBrowseScrollButtons();
+        }
+      });
+    }
+  });
+
+  return `
+    <div class="browse-filter-bar">
+      <input type="text" id="browseFilter" placeholder="Filter games by name..." value="${escHtml(state.browseFilter)}" />
+      <select id="browseSystemSelect">
+        <option value="all" ${state.browseSystemFilter==='all'?'selected':''}>All Systems (${entries.length})</option>
+        ${systemOptions}
+      </select>
+    </div>
+    <div class="browse-container">
+      ${filtered.map(([key, sys], idx) => {
+        // If ROMs are cached, render the row immediately
+        if (browseRomsCache[key]) {
+          return renderBrowseRow(key, sys);
+        }
+        // Otherwise show a placeholder row
+        return `<div class="browse-row" data-browse-system="${key}" data-browse-pending="${key}">
+          <div class="browse-row-header">
+            <h3>${escHtml(sys.name)}</h3>
+            <span class="browse-count">${sys.ok_count || 0} games</span>
+          </div>
+          <div class="browse-row-skeleton">Loading games...</div>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderBrowseRow(key, sys) {
+  let roms = browseRomsCache[key] || sys.roms || [];
+  if (state.browseFilter) {
+    const q = state.browseFilter.toLowerCase();
+    roms = roms.filter(r => (r.game_name || r.name).toLowerCase().includes(q));
+  }
+  // Only show properly-placed ROMs in browse view
+  roms = roms.filter(r => !r.issue);
+  if (!roms.length) return '';
+  roms.sort((a, b) => (a.game_name || a.name).localeCompare(b.game_name || b.name));
+
+  const CARD_LIMIT = 50;
+  const isExpanded = state.browseExpandedSystems[key];
+  const displayRoms = isExpanded ? roms : roms.slice(0, CARD_LIMIT);
+  const hasMore = roms.length > CARD_LIMIT && !isExpanded;
+
+  return `
+    <div class="browse-row" data-browse-system="${key}">
+      <div class="browse-row-header">
+        <h3>${escHtml(sys.name)}</h3>
+        <span class="browse-count">${roms.length} games</span>
+      </div>
+      <div class="browse-row-wrap">
+        <button class="browse-scroll-btn left" data-scroll-target="${key}">◀</button>
+        <div class="browse-row-scroll" id="browse-scroll-${key}">
+          ${displayRoms.map(r => renderBrowseCard(r, key)).join('')}
+          ${hasMore ? `<div class="browse-show-more" onclick="state.browseExpandedSystems['${key}']=true;render()">+${roms.length - CARD_LIMIT} more</div>` : ''}
+        </div>
+        <button class="browse-scroll-btn right" data-scroll-target="${key}">▶</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderBrowseCard(rom, systemFolder) {
+  const name = rom.game_name || rom.name.replace(/\.[^.]+$/, '');
+  const romData = JSON.stringify(rom).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+  const desc = rom.has_description ? '(has description)' : '';
+  return `
+    <div class="browse-card" onclick='showEditModal(${JSON.stringify(rom).replace(/'/g,"&#39;")}, "${escJs(systemFolder)}")'>
+      <div class="browse-card-img">
+        ${rom.has_cover && rom.cover_url
+          ? `<img src="${escHtml(rom.cover_url)}" loading="lazy" alt="${escHtml(name)}">`
+          : `<div class="browse-card-placeholder">🎮</div>`}
+      </div>
+      <div class="browse-card-name" title="${escHtml(name)}">${escHtml(name)}</div>
+      <div class="browse-card-overlay">
+        <div class="overlay-title">${escHtml(name)}</div>
+        ${desc ? `<div class="overlay-desc">${escHtml(desc)}</div>` : ''}
+        <div class="overlay-meta">${escHtml(rom.size_human)} · ${escHtml(rom.ext)}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function populateBrowseRow(element, systemKey) {
+  const sys = state.systems[systemKey];
+  if (!sys) return;
+  // Load ROMs if not cached
+  if (!browseRomsCache[systemKey]) {
+    await loadBrowseRoms(systemKey);
+  }
+  const rowHtml = renderBrowseRow(systemKey, sys);
+  if (rowHtml) {
+    const tmpDiv = document.createElement('div');
+    tmpDiv.innerHTML = rowHtml;
+    element.replaceWith(tmpDiv.firstElementChild);
+    bindBrowseScrollButtons();
+  }
+}
+
+function bindBrowseScrollButtons() {
+  document.querySelectorAll('.browse-scroll-btn').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const target = btn.dataset.scrollTarget;
+      const scrollEl = document.getElementById('browse-scroll-' + target);
+      if (scrollEl) {
+        const dir = btn.classList.contains('left') ? -1 : 1;
+        scrollEl.scrollBy({ left: dir * 486, behavior: 'smooth' });
+      }
+    };
+  });
+}
+
+function setupBrowseObserver() {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const sysKey = entry.target.dataset.browsePending;
+        if (sysKey) {
+          populateBrowseRow(entry.target, sysKey);
+          observer.unobserve(entry.target);
+        }
+      }
+    });
+  }, { rootMargin: '300px' });
+
+  document.querySelectorAll('.browse-row[data-browse-pending]').forEach(row => {
+    observer.observe(row);
+  });
+}
+
 function renderWelcome() {
   return `<div class="empty-state" style="padding:80px 20px">
     <div class="emoji">🎮</div>
@@ -1451,6 +2589,9 @@ function bindEvents() {
   document.querySelectorAll('.tab[data-tab]').forEach(el => {
     el.onclick = () => { state.activeTab = el.dataset.tab; state.selectedSystem = null; render(); };
   });
+  document.querySelectorAll('.stat-card[data-goto-tab]').forEach(el => {
+    el.onclick = () => { state.activeTab = el.dataset.gotoTab; state.selectedSystem = null; render(); };
+  });
   document.querySelectorAll('.system-card[data-system]').forEach(el => {
     el.onclick = () => loadSystem(el.dataset.system);
   });
@@ -1469,6 +2610,28 @@ function bindEvents() {
   if (het) {
     het.onchange = () => { state.hideEmptySystems = het.checked; render(); };
   }
+  // Browse mode event binding
+  const bf = document.getElementById('browseFilter');
+  if (bf) {
+    let debounce;
+    bf.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { state.browseFilter = bf.value; render(); }, 300); };
+  }
+  const bss = document.getElementById('browseSystemSelect');
+  if (bss) {
+    bss.onchange = () => { state.browseSystemFilter = bss.value; render(); };
+  }
+  const bfi = document.getElementById('biosFileInput');
+  if (bfi && !bfi._bound) {
+    bfi._bound = true;
+    bfi.onchange = async function() {
+      if (!this.files || !this.files.length) return;
+      const file = this.files[0];
+      const { _biosUploadSystem: system, _biosUploadFilename: filename } = window;
+      this.value = '';  // reset so same file can be re-selected
+      if (!system || !filename) return;
+      await fixUploadBios(system, filename, file);
+    };
+  }
 }
 
 // ─── Utils ───────────────────────────────────────────────────────────────────
@@ -1479,6 +2642,9 @@ function escJs(s) { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'
 function renderFooter() {
   return `<div class="footer">
     <span>Created by <a href="https://github.com/crs2007" target="_blank" rel="noopener">Sharon Rimer</a> &middot; MIT License</span>
+    <button class="btn btn-sm" onclick="openBugReport()"
+      style="border-color:var(--yellow);color:var(--yellow);opacity:0.75"
+      title="Report a bug or suggest a feature">⚠ Report Issue</button>
     <a class="btn-star" href="https://github.com/crs2007/recalbox-manager" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
         <path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>

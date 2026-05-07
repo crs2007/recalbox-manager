@@ -14,10 +14,10 @@ if errorlevel 1 (
 )
 
 REM Install dependencies only if missing
-python -c "import flask, flask_cors" >nul 2>&1
+python -c "import flask, flask_cors, py7zr" >nul 2>&1
 if errorlevel 1 (
     echo Installing dependencies...
-    pip install flask flask-cors --quiet
+    pip install -r requirements.txt --quiet
 )
 
 echo.

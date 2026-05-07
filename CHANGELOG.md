@@ -2,6 +2,101 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.04.23 — 2026-04-27
+### Changed
+- **BIOS Status UX** — Added a summary banner showing counts of required/optional/wrong-version BIOS files with a plain-language explanation of what to do. Rows now sorted by priority (required missing first, ok rows dimmed at bottom). Each missing/wrong-version row gets a "🔍 Search" button that opens a DuckDuckGo search for the filename. Upload button relabelled "⚡ Select & Upload" to clarify it opens a local file picker.
+
+## v2026.04.22 — 2026-04-27
+### Added
+- **31 new system definitions** — Added `tic80` (.tic), `pico8` (.p8/.png), `3do`, `apple2`, `atari800`, `atarixegs`, `bbcmicro`, `cdimono1`, `c16`, `c128`, `vic20`, `daphne`, `dragon32`, `easyrpg`, `famicom`, `gameandwatch`, `lowresnx` (.nx), `megaduck`, `n64dd`, `openbor` (.pak), `pcfx`, `sgb`, `solarus`, `supervision`, `ti99`, `turbografx`, `turbografxcd`, `uzebox` (.uze), `videopac`, `wasm4` (.wasm), `x1` to `SYSTEM_EXTENSIONS`. ROMs in these folders are no longer flagged as unknown/unrecognised.
+### Fixed
+- **Extension gaps on existing systems** — Added missing extensions: `.neo` (neogeo), `.chd` (mame), `.dmg` (gb/gbc/gba), `.68k`/`.mdx`/`.sgd` (megadrive/genesis), `.rom`/`.abs`/`.cof` (atarijaguar), `.md`/`.smd` (sega32x), `.toc`/`.cbn`/`.ccd` (psx), `.vboy` (virtualboy), `.pc2` (wonderswan/wonderswancolor), `.chd` (pcengine), `.scummvm` (scummvm), `.gz`/`.udi`/`.mgt`/`.trd`/`.scl`/`.dsk` (zxspectrum), `.m3u` (neogeocd/saturn/dreamcast).
+
+## v2026.04.21 — 2026-04-27
+### Fixed
+- **Connection indicator after failed scan** — When "Scan ROMs" fails (e.g. Recalbox offline or share unreachable), the "● Connected" indicator now correctly flips to "● Not found" instead of staying green.
+
+## v2026.04.20 — 2026-04-26
+### Added
+- **BIOS upload fix** — "⚡ Upload BIOS" button in the BIOS Status table for entries with status `missing` or `wrong_version`. Selecting a file uploads it via `POST /api/fix/upload-bios` which saves it to `{share}/bios/`. MD5 is verified if known — mismatch shows a yellow warning toast (regional variants still accepted). On success, BIOS table refreshes automatically.
+- **snes BIOS detection** — Added `BS-X.bin` (required, MD5 `fed4d8242cfbed61343d53d48432aced`) to `BIOS_REQUIREMENTS` for the `snes` system so the snes9x mandatory-BIOS error is now visible and actionable in the Diagnostics tab.
+
+## v2026.04.19 — 2026-04-26
+### Added
+- **Clickable stat cards** — All stat cards in the dashboard header are now clickable buttons that navigate directly to the relevant tab: Systems → Systems tab, Total ROMs → Browse, Misplaced → Issues, Duplicates → Duplicates, Total Issues → Issues, Diagnostics → Diagnostics, With Covers / Missing Covers → Missing Covers, With Descriptions / Missing Descriptions → Missing Descriptions. Total Size remains non-clickable. Cards show a pointer cursor and lift on hover.
+### Explained
+- **Total Issues vs Misplaced:** "Total Issues" counts all issue types combined — `unknown_system` (ROMs in unrecognized system folders), `misplaced` (wrong extension in a known system), `duplicate` groups, `corrupted_gamelist`, and `permission_error`. "Misplaced" only counts ROMs with a wrong extension inside a *known* system. ROMs in folders not listed in `SYSTEM_EXTENSIONS` (unknown systems) are counted in Total Issues but not in Misplaced.
+
+## v2026.04.18 — 2026-04-25
+### Added
+- **Report Issue feature** — "⚠ Report Issue" button in the footer, Diagnostics tab header, and Knowledge Base tab lets users report unknown issues directly from the app. Clicking it fetches a full diagnostic snapshot (app version, Python/OS info, scan stats, diagnostic counts, last 50 log lines) and opens a pre-filled GitHub issue in a new tab — no GitHub token required.
+- **`GET /api/diagnostics/snapshot`** — New endpoint that collects environment info, scan stats, and diagnostics grouped by type with sample files for bug-report use.
+- **`GET /api/version/check`** — Checks GitHub releases for a newer version (cached 1 hour). If an update is available, a subtle "↑ Update: vX.X.X" banner appears in the header linking to the release page.
+- **`POST /api/kb/report` + `GET /api/kb/reports`** — Session-local user report store (max 20, never written to disk). Submitted reports appear in a "Recently Reported by You" strip at the bottom of the Knowledge Base tab.
+- **In-memory log ring buffer** — A `_RingHandler` attached to the root logger captures the last 50 log lines in memory, included in the diagnostic snapshot for bug reports.
+- **"Request Auto-fix" button** — Diagnostic cards for non-auto-fixable issue types now show a "✦ Request Fix" button that opens the Report Issue modal pre-filled with the type and system name.
+- **"My problem is different" KB link** — Each expanded Knowledge Base card now has a link that opens the Report Issue modal pre-filled with the issue key.
+
+## v2026.04.17 — 2026-04-25
+### Fixed
+- **Move is a true move, not a copy** — After a successful `shutil.move`, the server now calls `_remove_rom_from_cache()` to remove the file from the source system in the in-memory scan cache (roms list, diagnostic issues, global issues, and stats). Previously the cache was never updated, so the file kept appearing in the source system panel, making it look as though it had only been copied. The UI now removes the diagnostic card and issues entry immediately on success without requiring a rescan.
+
+## v2026.04.16 — 2026-04-25
+### Fixed
+- **Move to non-existent system folder now works** — `/api/move` and `/api/bulk-move` previously returned "Destination system folder not found" for systems like `amiga` or `genesis` whose folders don't exist on the share yet (because the user never had ROMs there). Both endpoints now create the missing folder automatically before moving the file.
+
+## v2026.04.15 — 2026-04-25
+### Fixed
+- **`.7z` archive inspection now actually runs** — `start.bat` was only installing `flask` and `flask-cors`, silently skipping `py7zr`. As a result Check 7 (`wrong_zip_contents`) returned `None` for every `.7z` file and never flagged anything — Sega 32X (and any system with `.7z` ROMs) showed no in-portal indication of the "this 7zipped game does not contain any file supported by the selected emulator" issue. `start.bat` now installs from `requirements.txt` and the import test includes `py7zr`.
+- **Visible warning when `py7zr` is missing** — `/api/config` now returns `py7zr_available`. The UI shows an orange banner under the share-path bar telling the user to `pip install py7zr` and restart, so the silent-skip failure mode can never recur unnoticed. Server logs a `WARNING` at startup as well.
+
+## v2026.04.14 — 2026-04-25
+### Added
+- **Per-file Auto-Fix for wrong archive contents** — `wrong_zip_contents` diagnostic cards now show an **⚡ Move → {system}** button directly in the card header, matching the UX pattern of other fixable diagnostic types (`missing_cue`, `missing_m3u`, `smc_copier_header`). Clicking it moves the misplaced archive to its suggested system in one step without expanding the card.
+- **Wrong-archive warning badge on Diagnostics tab** — When archives with wrong inner contents are detected, an amber ⚠ count badge appears on the Diagnostics tab button so the problem is visible without navigating into the tab.
+
+## v2026.04.13 — 2026-04-19
+### Added
+- **Severity classification** — All 12 diagnostic issue types now carry `severity` (critical / warning / info) and `auto_fix` metadata. Diagnostic cards display a colored severity badge (red/yellow/cyan) in the card header.
+- **Auto-Fix: Generate CUE** — `POST /api/fix/generate-cue` creates a minimal single-track `.cue` file for any missing-CUE diagnostic. Cards for `missing_cue` issues now show an **⚡ Auto-Fix** button that runs the fix instantly and removes the card without a rescan.
+- **Auto-Fix: Generate M3U** — `POST /api/fix/generate-m3u` generates a multi-disc `.m3u` playlist. Cards for `missing_m3u` issues show an **⚡ Auto-Fix** button.
+- **Auto-Fix: Strip SMC Header** — `POST /api/fix/strip-smc-header` strips the 512-byte copier header from SNES `.smc` files, creating a `.smc.bak` backup first. Cards show an **⚡ Strip Header** button with a confirmation dialog.
+- **Auto-Fix: Rename BIOS** — `POST /api/fix/rename-bios` renames a wrong-case BIOS file to the expected filename. BIOS table now has an **Actions** column with an **⚡ Fix Case** button for `wrong_case` entries.
+- **Knowledge Base tab** — New **Knowledge Base** tab (between Diagnostics and Missing Covers) serves the full `DIAGNOSTIC_SOLUTIONS` dict via `GET /api/kb`. Supports full-text search (title, description, steps), category filtering (ROM Diagnostics / BIOS Issues), collapsible cards with severity + auto-fixable badges, numbered steps, and a "Search online" link per entry. Loaded automatically on init and after each scan.
+
+## v2026.04.12 — 2026-04-19
+### Added
+- **Corrupted gamelist.xml detection & auto-repair** — `parse_gamelist()` now reports corruption state (error, recoverability, repair kind) back to the scan pipeline, which emits a new `corrupted_gamelist` issue type. The Issues tab surfaces these with a 🧩 icon, parse-error detail, count of recovered entries, and a **Repair** button. New `POST /api/gamelist/repair` endpoint creates a `.bak` backup, strips trailing junk after the last `</gameList>`, verifies the result parses, atomically replaces the file, refreshes the in-memory cache, and drops the issue. Filter chip added for the new issue type.
+
+## v2026.04.11 — 2026-04-18
+### Fixed
+- **Malformed gamelist.xml recovery** — `parse_gamelist()` now recovers from trailing junk after the `</gameList>` closing tag (e.g. `</gameList>st>`). Previously, any XML parse error caused the entire gamelist to be silently skipped, making all cover images and metadata invisible. Affected sega32x and potentially any system with a corrupted gamelist.xml
+
+## v2026.04.10 — 2026-04-18
+### Added
+- **Browser favicon** — added an SVG favicon (retro game controller icon) matching the app's dark/cyan theme, so the browser tab shows a proper icon instead of the generic default
+
+## v2026.04.9 — 2026-04-18
+### Fixed
+- **Browse tab stale covers** — after setting/scraping a cover image on a ROM, the browse tab now correctly shows the updated cover instead of the old "no cover" placeholder. The browse cache is invalidated when system data is reloaded.
+
+## v2026.04.8 — 2026-04-18
+### Added
+- **Sega Fandom Wiki scraper** — new `fetch_sega_fandom_description()` and `fetch_sega_fandom_cover()` functions that pull game descriptions and cover images from sega.fandom.com via MediaWiki API (opensearch + extracts/pageimages). Automatically used for Sega systems (Mega Drive, Master System, Game Gear, Saturn, Dreamcast, etc.)
+- **Generalized fallback scrape chain** — replaced hardcoded if-else fallback logic with a data-driven `SCRAPE_SOURCES` registry and `_run_fallback_chain()` runner. Sources are tried in order, skipping those that don't apply to the current system. Transient errors (rate limit, timeout) stop the chain; "not found" errors cascade to the next source
+  - **Covers:** ScreenScraper → Libretro Thumbnails → Sega Fandom Wiki (Sega systems only)
+  - **Descriptions:** ScreenScraper → Sega Fandom Wiki (Sega systems only) → Bootleg Games Wiki
+- Frontend toasts now show which source provided data (e.g. "via sega_fandom") and handle new error types (`sega_fandom_down`, `no_sources`)
+
+### Changed
+- Adding a new scrape source now only requires writing a fetch function and appending one entry to the `SCRAPE_SOURCES` list — no endpoint changes needed
+
+## v2026.04.7 — 2026-04-18
+### Added
+- **Netflix-style Browse tab** — card-based horizontal scrolling interface for browsing the game library visually, with cover art cards, hover overlays, lazy-loaded rows via IntersectionObserver, per-row scroll buttons, system filter, and text search
+- **Metadata editing suite** — click any game (from Browse tab or table view ✏️ button) to open a rich edit modal with game name, description, star rating, cover preview, cover download from URL, and scrape buttons
+- **`/api/covers/download-url` endpoint** — download cover images from user-provided URLs with image validation (PNG/JPEG/GIF/WebP magic bytes), 10MB size limit, and automatic gamelist.xml update
+
 ## v2026.04.6 — 2026-04-14
 ### Fixed
 - Connection indicator now updates to "Connected" after a successful scan — previously it stayed "Not found" if the Recalbox was offline when the page first loaded

@@ -17,6 +17,7 @@ try:
     import py7zr
     PY7ZR_AVAILABLE = True
 except ImportError:
+    py7zr = None
     PY7ZR_AVAILABLE = False
 import mimetypes
 import configparser
@@ -33,9 +34,30 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+import collections as _collections
+
+
+class _RingHandler(logging.Handler):
+    """Captures the last N log lines in a deque for bug-report snapshots."""
+    def __init__(self, capacity: int = 50):
+        super().__init__()
+        self._buf: _collections.deque[str] = _collections.deque(maxlen=capacity)
+        self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._buf.append(self.format(record))
+
+    def get_lines(self) -> list[str]:
+        return list(self._buf)
+
+
+_log_ring = _RingHandler(capacity=50)
+logging.getLogger().addHandler(_log_ring)
+
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.04.6"
+APP_VERSION = "2026.04.23"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -56,84 +78,117 @@ def _bios_root() -> str:
 SYSTEM_EXTENSIONS = {
     # Nintendo
     "nes":          {".nes", ".unf", ".unif", ".fds", ".zip", ".7z"},
+    "famicom":      {".nes", ".fds", ".zip", ".7z"},
     "snes":         {".smc", ".sfc", ".fig", ".swc", ".zip", ".7z"},
     "n64":          {".n64", ".z64", ".v64", ".zip", ".7z"},
-    "gb":           {".gb", ".zip", ".7z"},
-    "gbc":          {".gbc", ".gb", ".zip", ".7z"},
-    "gba":          {".gba", ".zip", ".7z"},
+    "n64dd":        {".n64", ".n64dd", ".ndd", ".z64"},
+    "gb":           {".gb", ".dmg", ".zip", ".7z"},
+    "gbc":          {".gbc", ".gb", ".dmg", ".zip", ".7z"},
+    "gba":          {".gba", ".dmg", ".zip", ".7z"},
     "nds":          {".nds", ".zip", ".7z"},
     "gamecube":     {".iso", ".gcm", ".ciso", ".gcz", ".rvz"},
     "wii":          {".iso", ".wbfs", ".ciso", ".gcz", ".rvz"},
-    "virtualboy":   {".vb", ".zip", ".7z"},
+    "virtualboy":   {".vb", ".vboy", ".zip", ".7z"},
     "fds":          {".fds", ".nes", ".zip", ".7z"},
     "satellaview":  {".bs", ".smc", ".sfc", ".zip", ".7z"},
     "sufami":       {".smc", ".sfc", ".zip", ".7z"},
     "pokemini":     {".min", ".zip", ".7z"},
+    "sgb":          {".gb", ".gbc", ".zip", ".7z"},
     # Sega
-    "megadrive":    {".md", ".bin", ".gen", ".smd", ".zip", ".7z"},
-    "genesis":      {".md", ".bin", ".gen", ".smd", ".zip", ".7z"},
+    "megadrive":    {".md", ".bin", ".gen", ".smd", ".68k", ".mdx", ".sgd", ".zip", ".7z"},
+    "genesis":      {".md", ".bin", ".gen", ".smd", ".68k", ".mdx", ".sgd", ".zip", ".7z"},
     "mastersystem": {".sms", ".bin", ".zip", ".7z"},
     "gamegear":     {".gg", ".zip", ".7z"},
     "sg1000":       {".sg", ".bin", ".zip", ".7z"},
-    "sega32x":      {".32x", ".bin", ".zip", ".7z"},
+    "sega32x":      {".32x", ".bin", ".md", ".smd", ".zip", ".7z"},
     "segacd":       {".iso", ".bin", ".cue", ".chd"},
-    "saturn":       {".iso", ".bin", ".cue", ".chd", ".mdf", ".mds"},
-    "dreamcast":    {".gdi", ".cdi", ".chd", ".cue", ".bin", ".iso"},
+    "saturn":       {".iso", ".bin", ".cue", ".chd", ".mdf", ".mds", ".m3u"},
+    "dreamcast":    {".gdi", ".cdi", ".chd", ".cue", ".bin", ".iso", ".m3u"},
+    "megaduck":     {".bin", ".zip", ".7z"},
     # Sony
-    "psx":          {".iso", ".bin", ".cue", ".img", ".pbp", ".chd", ".m3u", ".mdf", ".mds", ".ecm"},
+    "psx":          {".iso", ".bin", ".cue", ".img", ".pbp", ".chd", ".m3u", ".mdf", ".mds", ".ecm", ".toc", ".cbn", ".ccd"},
     "psp":          {".iso", ".cso", ".pbp"},
     # Atari
     "atari2600":    {".a26", ".bin", ".zip", ".7z"},
     "atari5200":    {".a52", ".bin", ".zip", ".7z"},
     "atari7800":    {".a78", ".bin", ".zip", ".7z"},
-    "atarijaguar":  {".j64", ".jag", ".zip", ".7z"},
+    "atari800":     {".atr", ".rom", ".xex", ".zip", ".7z"},
+    "atarixegs":    {".bin", ".rom", ".xex", ".zip", ".7z"},
+    "atarijaguar":  {".j64", ".jag", ".rom", ".abs", ".cof", ".zip", ".7z"},
     "atarilynx":    {".lnx", ".zip", ".7z"},
     "atarist":      {".st", ".stx", ".msa", ".ipf", ".zip", ".7z"},
     # NEC
-    "pcengine":     {".pce", ".zip", ".7z"},
+    "pcengine":     {".pce", ".chd", ".zip", ".7z"},
     "pcenginecd":   {".cue", ".bin", ".iso", ".chd"},
+    "turbografx":   {".pce", ".chd", ".zip", ".7z"},
+    "turbografxcd": {".pce", ".ccd", ".iso", ".img", ".chd", ".cue"},
+    "pcfx":         {".chd", ".zip", ".cue", ".ccd", ".toc"},
     "supergrafx":   {".pce", ".sgx", ".zip", ".7z"},
     # SNK
-    "neogeo":       {".zip", ".7z"},
-    "neogeocd":     {".cue", ".bin", ".iso", ".chd"},
+    "neogeo":       {".zip", ".7z", ".neo"},
+    "neogeocd":     {".cue", ".bin", ".iso", ".chd", ".m3u"},
     "ngp":          {".ngp", ".zip", ".7z"},
     "ngpc":         {".ngc", ".ngpc", ".zip", ".7z"},
     # Arcade
-    "mame":         {".zip", ".7z"},
+    "mame":         {".zip", ".7z", ".chd"},
     "fbneo":        {".zip", ".7z"},
     "fba":          {".zip", ".7z"},
     "fba_libretro": {".zip", ".7z"},
     "naomi":        {".zip", ".7z", ".dat", ".bin", ".lst"},
     "atomiswave":   {".zip", ".7z", ".bin", ".dat", ".lst"},
+    "daphne":       {".daphne"},
     # Computers
+    "apple2":       {".dsk", ".do", ".po", ".zip", ".7z"},
+    "bbcmicro":     {".dsd", ".ssd", ".zip", ".7z"},
     "msx":          {".rom", ".mx1", ".mx2", ".dsk", ".cas", ".zip", ".7z"},
     "msx1":         {".rom", ".mx1", ".dsk", ".cas", ".zip", ".7z"},
     "msx2":         {".rom", ".mx2", ".dsk", ".cas", ".zip", ".7z"},
     "amstradcpc":   {".dsk", ".sna", ".tap", ".cdt", ".zip", ".7z"},
-    "zxspectrum":   {".tzx", ".tap", ".z80", ".sna", ".szx", ".zip", ".7z"},
+    "zxspectrum":   {".tzx", ".tap", ".z80", ".sna", ".szx", ".gz", ".udi", ".mgt", ".trd", ".scl", ".dsk", ".zip", ".7z"},
     "zx81":         {".p", ".tzx", ".zip", ".7z"},
     "c64":          {".d64", ".t64", ".prg", ".tap", ".crt", ".zip", ".7z"},
+    "c16":          {".d64", ".t64", ".tap", ".prg", ".crt", ".bin", ".zip", ".7z"},
+    "c128":         {".d64", ".t64", ".tap", ".prg", ".crt", ".bin", ".zip", ".7z"},
+    "vic20":        {".d64", ".t64", ".tap", ".prg", ".crt", ".bin", ".zip", ".7z"},
     "amiga":        {".adf", ".adz", ".dms", ".ipf", ".hdf", ".hdz", ".lha", ".zip", ".7z"},
     "amiga600":     {".adf", ".adz", ".dms", ".ipf", ".hdf", ".hdz", ".lha", ".zip", ".7z"},
     "amiga1200":    {".adf", ".adz", ".dms", ".ipf", ".hdf", ".hdz", ".lha", ".zip", ".7z"},
     "amigacd32":    {".iso", ".cue", ".bin", ".chd", ".lha"},
     "dos":          {".zip", ".7z", ".exe", ".com", ".bat", ".dosz"},
-    "scummvm":      {".svm"},
+    "scummvm":      {".svm", ".scummvm"},
     "pc88":         {".d88", ".zip", ".7z"},
     "pc98":         {".hdi", ".fdi", ".d88", ".zip", ".7z"},
     "x68000":       {".dim", ".hdf", ".2hd", ".zip", ".7z"},
+    "x1":           {".dx1", ".zip", ".7z"},
     "thomson":      {".fd", ".sap", ".k7", ".m7", ".m5", ".zip"},
-    # Misc
-    "wonderswan":   {".ws", ".zip", ".7z"},
-    "wonderswancolor": {".wsc", ".ws", ".zip", ".7z"},
-    "vectrex":      {".vec", ".gam", ".bin", ".zip", ".7z"},
-    "colecovision": {".col", ".bin", ".rom", ".zip", ".7z"},
-    "intellivision":{".int", ".bin", ".rom", ".zip", ".7z"},
-    "odyssey2":     {".bin", ".zip", ".7z"},
-    "channelf":     {".bin", ".chf", ".zip", ".7z"},
+    "dragon32":     {".bin", ".cas", ".dsk", ".rom", ".zip"},
+    # Fantasy consoles
+    "tic80":        {".tic"},
+    "pico8":        {".png", ".p8"},
+    "lowresnx":     {".nx"},
+    "wasm4":        {".wasm"},
+    # Handhelds & misc consoles
+    "wonderswan":      {".ws", ".pc2", ".zip", ".7z"},
+    "wonderswancolor": {".wsc", ".ws", ".pc2", ".zip", ".7z"},
+    "vectrex":         {".vec", ".gam", ".bin", ".zip", ".7z"},
+    "colecovision":    {".col", ".bin", ".rom", ".zip", ".7z"},
+    "intellivision":   {".int", ".bin", ".rom", ".zip", ".7z"},
+    "odyssey2":        {".bin", ".zip", ".7z"},
+    "videopac":        {".bin", ".zip", ".7z"},
+    "channelf":        {".bin", ".chf", ".zip", ".7z"},
+    "supervision":     {".bin", ".zip", ".7z"},
+    "gameandwatch":    {".mgw", ".zip"},
+    "ti99":            {".ctg", ".zip"},
+    "uzebox":          {".uze"},
+    "cdimono1":        {".iso", ".chd"},
+    "3do":             {".iso", ".bin", ".chd", ".cue"},
+    # Game engines / ports
     "lutro":        {".lua", ".lutro", ".zip", ".7z"},
     "cavestory":    {".zip"},
     "prboom":       {".wad"},
+    "easyrpg":      {".easyrpg", ".zip"},
+    "openbor":      {".pak"},
+    "solarus":      {".solarus", ".zip"},
     "ports":        set(),  # anything goes
     "imageviewer":  {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tga", ".psd"},
 }
@@ -182,8 +237,22 @@ SYSTEM_DISPLAY_NAMES = {
     "prboom": "Doom (PrBoom)", "ports": "Ports",
     "pokemini": "Pokémon Mini", "satellaview": "Satellaview",
     "pc88": "NEC PC-88", "pc98": "NEC PC-98", "x68000": "Sharp X68000",
+    "x1": "Sharp X1",
     "thomson": "Thomson", "channelf": "Fairchild Channel F",
     "lutro": "Lutro", "cavestory": "Cave Story",
+    # New systems
+    "famicom": "Famicom", "n64dd": "Nintendo 64DD", "sgb": "Super Game Boy",
+    "tic80": "TIC-80", "pico8": "PICO-8", "lowresnx": "LowRes NX", "wasm4": "WASM-4",
+    "3do": "3DO", "cdimono1": "Philips CD-i",
+    "apple2": "Apple II", "bbcmicro": "BBC Micro",
+    "atari800": "Atari 8-bit", "atarixegs": "Atari XEGS",
+    "c16": "Commodore 16", "c128": "Commodore 128", "vic20": "Commodore VIC-20",
+    "dragon32": "Dragon 32", "megaduck": "Mega Duck",
+    "turbografx": "TurboGrafx-16", "turbografxcd": "TurboGrafx-CD", "pcfx": "PC-FX",
+    "supervision": "Watara Supervision", "gameandwatch": "Game & Watch",
+    "ti99": "TI-99/4A", "uzebox": "Uzebox", "videopac": "Videopac",
+    "daphne": "Daphne (LaserDisc)", "easyrpg": "EasyRPG",
+    "openbor": "OpenBOR", "solarus": "Solarus",
 }
 
 # ─── ScreenScraper Integration ───────────────────────────────────────────────
@@ -363,6 +432,14 @@ BIOS_REQUIREMENTS = {
         {"file": "MSX2.ROM", "required": True, "desc": "MSX2 BIOS"},
         {"file": "MSX2EXT.ROM", "required": True, "desc": "MSX2 Extended BIOS"},
     ],
+    "snes": [
+        {
+            "file": "BS-X.bin",
+            "md5": "fed4d8242cfbed61343d53d48432aced",
+            "required": True,
+            "desc": "BS-X Satellaview BIOS (required by snes9x core)",
+        },
+    ],
 }
 
 # ─── Diagnostic Solutions Knowledge Base ─────────────────────────────────────
@@ -370,6 +447,8 @@ BIOS_REQUIREMENTS = {
 DIAGNOSTIC_SOLUTIONS = {
     "missing_cue": {
         "title": "Missing CUE file",
+        "severity": "critical",
+        "auto_fix": True,
         "description": "CD-ROM games need a .cue file describing the disc track layout. Without it the emulator cannot read the disc.",
         "steps": [
             "Create a text file named exactly like the .bin but with .cue extension (same folder).",
@@ -380,6 +459,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "missing_m3u": {
         "title": "Multi-disc game needs .m3u playlist",
+        "severity": "warning",
+        "auto_fix": True,
         "description": "Games spread across multiple discs require an .m3u playlist so the emulator knows the disc order.",
         "steps": [
             "Create a plain-text file named after the game with .m3u extension in the same system folder.",
@@ -390,6 +471,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "broken_m3u": {
         "title": "M3U playlist references missing file(s)",
+        "severity": "warning",
+        "auto_fix": False,
         "description": "The .m3u playlist file lists disc files that do not exist in the same folder.",
         "steps": [
             "Open the .m3u file in a text editor and check each line.",
@@ -400,6 +483,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "missing_bios": {
         "title": "Required BIOS file missing",
+        "severity": "critical",
+        "auto_fix": False,
         "description": "This system requires a BIOS ROM to boot. Without it the emulator will crash or show a black screen.",
         "steps": [
             "Check the BIOS tab for the exact filename and MD5 hash required.",
@@ -410,6 +495,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "wrong_bios_md5": {
         "title": "BIOS file present but wrong version/region",
+        "severity": "critical",
+        "auto_fix": False,
         "description": "The BIOS file exists but its MD5 hash does not match the expected value. It may be the wrong region or a bad dump.",
         "steps": [
             "Verify the MD5 of your BIOS file using a tool like CertUtil (Windows) or md5sum (Linux).",
@@ -420,6 +507,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "corrupt_archive": {
         "title": "ZIP/7z archive is corrupt or unreadable",
+        "severity": "critical",
+        "auto_fix": False,
         "description": "The archive file fails integrity checks. The emulator will not be able to extract and load the ROM.",
         "steps": [
             "Try extracting the archive on your PC to confirm it is readable.",
@@ -430,6 +519,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "likely_overdump": {
         "title": "ROM appears to be an overdump",
+        "severity": "info",
+        "auto_fix": False,
         "description": "The file ends with a large block of repeated 0xFF or 0x00 bytes, which is the hallmark of a bad dump with padding.",
         "steps": [
             "The ROM may still work — some emulators handle overdumps gracefully.",
@@ -440,6 +531,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "empty_file": {
         "title": "File is empty or too small",
+        "severity": "critical",
+        "auto_fix": False,
         "description": "The ROM file is 0 bytes or smaller than a valid ROM could ever be. It is almost certainly a corrupt or incomplete download.",
         "steps": [
             "Delete the file and re-download from a reliable source.",
@@ -449,6 +542,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "wrong_zip_contents": {
         "title": "ZIP contains files for wrong system",
+        "severity": "warning",
+        "auto_fix": True,
         "description": (
             "The archive container (.zip/.7z) is accepted here, but the files inside "
             "belong to a different system. The emulator opens the archive and finds nothing it can use."
@@ -463,6 +558,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "smc_copier_header": {
         "title": "SNES ROM has legacy copier header",
+        "severity": "warning",
+        "auto_fix": True,
         "description": (
             "This .smc file contains a 512-byte copier header added by old backup hardware. "
             "Many libretro SNES cores reject it, causing a black screen or crash on load."
@@ -476,6 +573,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "invalid_nes_header": {
         "title": "NES ROM has invalid iNES header",
+        "severity": "warning",
+        "auto_fix": False,
         "description": (
             "This .nes file does not start with the expected iNES magic bytes (NES\\x1a). "
             "It may be a corrupt download, a renamed non-NES file, or a legacy bad dump."
@@ -489,6 +588,8 @@ DIAGNOSTIC_SOLUTIONS = {
     },
     "n64_non_canonical": {
         "title": "N64 ROM is in non-canonical byte order",
+        "severity": "info",
+        "auto_fix": False,
         "description": (
             "This file uses a byte-swapped (.v64) or little-endian (.n64) format. "
             "The canonical N64 format is big-endian (.z64). While Mupen64Plus-Next handles "
@@ -531,6 +632,15 @@ scan_cache = {
     "stats": {},
     "gamelists": {},
 }
+
+# ─── Session-Local User Reports ───────────────────────────────────────────────
+# Ephemeral — never written to disk, lost on restart. Max 20 entries.
+user_reports: list[dict] = []
+_USER_REPORTS_MAX = 20
+
+# ─── Version Check Cache ──────────────────────────────────────────────────────
+_version_cache: dict = {}
+_VERSION_CACHE_TTL = 3600  # seconds
 
 
 def get_file_hash(filepath: str, block_size: int = _HASH_BLOCK_SIZE) -> str | None:
@@ -898,16 +1008,45 @@ def run_rom_diagnostics(system_key: str, system_path: str, roms: list[dict]) -> 
     return diag_issues
 
 
-def parse_gamelist(system_dir: str) -> dict:
+def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
     """
     Parse <_roms_root()>/<system_dir>/gamelist.xml and return a dict keyed by
     lowercased filename stem -> {path, name, image, image_exists, thumbnail, desc}.
     Returns {} if file is absent or unreadable — never raises.
+
+    If `info` is provided, it is populated with:
+      - present (bool): whether the gamelist.xml file exists
+      - corrupted (bool): whether the file failed to parse on first try
+      - recoverable (bool): whether trailing-junk recovery succeeded
+      - error (str|None): the parse error detail, if any
+      - repair_kind (str|None): 'trailing_junk' if junk after </gameList>
     """
     xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
     result = {}
+    if info is not None:
+        info.update({"present": os.path.exists(xml_path), "corrupted": False,
+                     "recoverable": False, "error": None, "repair_kind": None})
     try:
-        tree = ET.parse(xml_path)
+        try:
+            tree = ET.parse(xml_path)
+        except ET.ParseError as e:
+            if info is not None:
+                info["corrupted"] = True
+                info["error"] = str(e)
+            # Try to recover from trailing junk after </gameList>
+            with open(xml_path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            end_tag = "</gameList>"
+            idx = raw.rfind(end_tag)
+            if idx >= 0:
+                raw = raw[: idx + len(end_tag)]
+                tree = ET.ElementTree(ET.fromstring(raw))
+                if info is not None:
+                    info["recoverable"] = True
+                    info["repair_kind"] = "trailing_junk"
+                logger.info(f"Recovered malformed gamelist.xml for {system_dir} (trailing junk stripped)")
+            else:
+                raise
         root = tree.getroot()
         for game in root.findall("game"):
             path_el = game.find("path")
@@ -992,8 +1131,18 @@ def scan_roms() -> dict:
         ignored_count = 0
 
         # Load gamelist.xml once per system for cover/metadata lookups
-        gamelist = parse_gamelist(system_dir)
+        gl_info: dict = {}
+        gamelist = parse_gamelist(system_dir, info=gl_info)
         scan_cache["gamelists"][system_dir] = gamelist
+        if gl_info.get("corrupted"):
+            issues.append({
+                "type": "corrupted_gamelist",
+                "system": system_dir,
+                "error": gl_info.get("error") or "parse failed",
+                "recoverable": gl_info.get("recoverable", False),
+                "repair_kind": gl_info.get("repair_kind"),
+                "recovered_entries": len(gamelist),
+            })
 
         try:
             for entry in os.scandir(system_path):
@@ -1175,6 +1324,7 @@ def get_config():
         "roms_root": _roms_root(),
         "share_path": _config["share"],
         "accessible": os.path.exists(_roms_root()),
+        "py7zr_available": PY7ZR_AVAILABLE,
         "screenscraper_user": ss_config.get("screenscraper_user", ""),
         "screenscraper_devid": ss_config.get("screenscraper_devid", ""),
         "screenscraper_configured": bool(
@@ -1308,7 +1458,11 @@ def move_rom():
         return jsonify({"error": f"Source file not found: {filename}"}), 404
 
     if not os.path.isdir(dst_dir):
-        return jsonify({"error": f"Destination system folder not found: {dst_system}"}), 404
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            logger.info(f"Created system folder: {dst_dir}")
+        except OSError as e:
+            return jsonify({"error": f"Cannot create destination folder {dst_system}: {e}"}), 500
 
     if os.path.exists(dst_path):
         src_hash = get_file_hash(src_path)
@@ -1330,6 +1484,7 @@ def move_rom():
     try:
         shutil.move(src_path, dst_path)
         logger.info(f"Moved {filename}: {src_system} -> {dst_system}")
+        _remove_rom_from_cache(src_system, filename)
         return jsonify({"ok": True, "moved": {"file": filename, "from": src_system, "to": dst_system}})
     except (OSError, shutil.Error) as e:
         return jsonify({"error": str(e)}), 500
@@ -1390,10 +1545,14 @@ def bulk_move():
         dst_dir = os.path.join(_roms_root(), to_system)
         dst = os.path.join(dst_dir, filename)
         try:
-            if os.path.exists(src) and os.path.isdir(dst_dir) and not os.path.exists(dst):
+            if not os.path.isdir(dst_dir):
+                os.makedirs(dst_dir, exist_ok=True)
+                logger.info(f"Created system folder: {dst_dir}")
+            if os.path.exists(src) and not os.path.exists(dst):
                 shutil.move(src, dst)
+                _remove_rom_from_cache(from_system, filename)
                 results.append({"file": filename, "status": "moved"})
-            elif os.path.exists(src) and os.path.isdir(dst_dir) and os.path.exists(dst):
+            elif os.path.exists(src) and os.path.exists(dst):
                 src_hash = get_file_hash(src)
                 dst_hash = get_file_hash(dst)
                 if src_hash and dst_hash and src_hash == dst_hash:
@@ -1443,6 +1602,409 @@ def get_diagnostics():
         for diag in sys_info.get("diagnostic_issues", []):
             all_diags.append(diag)
     return jsonify(all_diags)
+
+
+@app.route("/api/diagnostics/snapshot")
+def diagnostics_snapshot():
+    """Collect all data needed for a bug report in one call."""
+    import platform
+    import sys as _sys
+
+    env = {
+        "app_version": APP_VERSION,
+        "python_version": _sys.version,
+        "platform": platform.platform(),
+        "py7zr_available": PY7ZR_AVAILABLE,
+        "share_accessible": os.path.exists(_roms_root()),
+    }
+
+    scan_info = {
+        "last_scan": scan_cache.get("last_scan"),
+        "stats": scan_cache.get("stats") or {},
+    }
+
+    diag_by_type: dict[str, dict] = {}
+    for sys_info in scan_cache.get("systems", {}).values():
+        for diag in sys_info.get("diagnostic_issues", []):
+            key = diag.get("key", "unknown")
+            if key not in diag_by_type:
+                sol = DIAGNOSTIC_SOLUTIONS.get(key, {})
+                diag_by_type[key] = {
+                    "severity": sol.get("severity", "unknown"),
+                    "auto_fix": sol.get("auto_fix", False),
+                    "count": 0,
+                    "sample_files": [],
+                }
+            entry = diag_by_type[key]
+            entry["count"] += 1
+            if len(entry["sample_files"]) < 3:
+                entry["sample_files"].append(
+                    f"{diag.get('system', '?')}/{diag.get('file', '?')}"
+                )
+
+    return jsonify({
+        "env": env,
+        "scan": scan_info,
+        "diagnostics_by_type": diag_by_type,
+        "recent_logs": _log_ring.get_lines(),
+    })
+
+
+# ─── Auto-Fix Helpers ─────────────────────────────────────────────────────────
+
+def _safe_rom_path(system: str, filename: str):
+    """Validate system+filename and return (abs_path, error_string)."""
+    if system not in VALID_SYSTEMS:
+        return None, f"Invalid system: {system}"
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name != filename:
+        return None, "Invalid filename"
+    path = os.path.join(_roms_root(), system, safe_name)
+    return path, None
+
+
+def _remove_rom_from_cache(system: str, filename: str) -> None:
+    """Remove a ROM entry (and its diagnostics) from scan_cache after a move or delete."""
+    sys_info = scan_cache.get("systems", {}).get(system)
+    if not sys_info:
+        return
+    before = len(sys_info.get("roms", []))
+    sys_info["roms"] = [r for r in sys_info.get("roms", []) if r.get("name") != filename]
+    removed = before - len(sys_info["roms"])
+    if not removed:
+        return
+    sys_info["total_roms"] = max(0, sys_info.get("total_roms", 0) - removed)
+    # Remove associated diagnostic issues
+    before_diag = len(sys_info.get("diagnostic_issues", []))
+    sys_info["diagnostic_issues"] = [d for d in sys_info.get("diagnostic_issues", []) if d.get("file") != filename]
+    removed_diag = before_diag - len(sys_info["diagnostic_issues"])
+    sys_info["diagnostic_count"] = max(0, sys_info.get("diagnostic_count", 0) - removed_diag)
+    # Remove from global issues list
+    scan_cache["issues"] = [
+        i for i in scan_cache.get("issues", [])
+        if not (i.get("current_system") == system and i.get("file") == filename)
+    ]
+    # Update global stats
+    stats = scan_cache.get("stats", {})
+    if stats:
+        stats["total_files"] = max(0, stats.get("total_files", 0) - removed)
+        stats["total_diagnostics"] = max(0, stats.get("total_diagnostics", 0) - removed_diag)
+
+
+def _remove_diag_from_cache(system: str, diag_key: str, filename: str) -> None:
+    """Remove a resolved diagnostic from in-memory scan_cache."""
+    sys_info = scan_cache.get("systems", {}).get(system)
+    if not sys_info:
+        return
+    before = len(sys_info.get("diagnostic_issues", []))
+    sys_info["diagnostic_issues"] = [
+        d for d in sys_info.get("diagnostic_issues", [])
+        if not (d.get("key") == diag_key and d.get("file") == filename)
+    ]
+    removed = before - len(sys_info["diagnostic_issues"])
+    sys_info["diagnostic_count"] = max(0, sys_info.get("diagnostic_count", 0) - removed)
+    if scan_cache.get("stats") and removed:
+        scan_cache["stats"]["total_diagnostics"] = max(
+            0, scan_cache["stats"].get("total_diagnostics", 0) - removed
+        )
+    for rom in sys_info.get("roms", []):
+        if rom.get("name") == filename:
+            diags = rom.get("diagnostics", [])
+            if diag_key in diags:
+                diags.remove(diag_key)
+            break
+
+
+def _kb_category(key: str) -> str:
+    if key in {"missing_bios", "wrong_bios_md5"}:
+        return "bios"
+    if key in {
+        "missing_cue", "missing_m3u", "broken_m3u", "empty_file",
+        "likely_overdump", "corrupt_archive", "wrong_zip_contents",
+        "smc_copier_header", "invalid_nes_header", "n64_non_canonical",
+    }:
+        return "diagnostic"
+    return "rom_issue"
+
+
+# ─── Auto-Fix Routes ──────────────────────────────────────────────────────────
+
+@app.route("/api/fix/generate-cue", methods=["POST"])
+def fix_generate_cue():
+    data = request.get_json(silent=True) or {}
+    system = data.get("system", "")
+    filename = data.get("filename", "")
+    if not system or not filename:
+        return jsonify({"error": "missing_params"}), 400
+    if system not in CD_SYSTEMS:
+        return jsonify({"error": "not_cd_system", "detail": f"{system} is not a CD-ROM system"}), 400
+    bin_path, err = _safe_rom_path(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
+    if not os.path.exists(bin_path):
+        return jsonify({"error": "not_found", "detail": f"{filename} not found in {system}"}), 404
+    stem = os.path.splitext(filename)[0]
+    cue_name = stem + ".cue"
+    cue_path = os.path.join(_roms_root(), system, cue_name)
+    if os.path.exists(cue_path):
+        return jsonify({"error": "already_exists", "detail": f"{cue_name} already exists"}), 409
+    cue_content = f'FILE "{filename}" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n'
+    try:
+        with open(cue_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(cue_content)
+    except OSError as e:
+        return jsonify({"error": "write_error", "detail": str(e)}), 500
+    logger.info("Generated CUE file: %s", cue_path)
+    _remove_diag_from_cache(system, "missing_cue", filename)
+    return jsonify({"ok": True, "created": cue_name})
+
+
+@app.route("/api/fix/generate-m3u", methods=["POST"])
+def fix_generate_m3u():
+    data = request.get_json(silent=True) or {}
+    system = data.get("system", "")
+    files = data.get("files", [])
+    game_name = data.get("game_name", "").strip()
+    if not system or not files:
+        return jsonify({"error": "missing_params"}), 400
+    if system not in CD_SYSTEMS:
+        return jsonify({"error": "not_cd_system", "detail": f"{system} is not a CD-ROM system"}), 400
+    sys_dir = os.path.join(_roms_root(), system)
+    missing = [f for f in files if not os.path.exists(os.path.join(sys_dir, os.path.basename(f)))]
+    if missing:
+        return jsonify({"error": "missing_files", "missing": missing}), 400
+    if not game_name and files:
+        stem = os.path.splitext(os.path.basename(files[0]))[0]
+        game_name = re.sub(r"\s*\(disc\s*\d+\)", "", stem, flags=re.IGNORECASE).strip()
+    if not game_name:
+        return jsonify({"error": "cannot_derive_name"}), 400
+    def _disc_sort_key(f):
+        m = re.search(r"\(disc\s*(\d+)\)", f, re.IGNORECASE)
+        return int(m.group(1)) if m else 0
+    sorted_files = sorted(files, key=_disc_sort_key)
+    m3u_name = game_name + ".m3u"
+    m3u_path = os.path.join(sys_dir, m3u_name)
+    if os.path.exists(m3u_path):
+        return jsonify({"error": "already_exists", "detail": f"{m3u_name} already exists"}), 409
+    try:
+        with open(m3u_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(sorted_files) + "\n")
+    except OSError as e:
+        return jsonify({"error": "write_error", "detail": str(e)}), 500
+    logger.info("Generated M3U playlist: %s", m3u_path)
+    for fname in files:
+        _remove_diag_from_cache(system, "missing_m3u", os.path.basename(fname))
+    return jsonify({"ok": True, "created": m3u_name})
+
+
+@app.route("/api/fix/strip-smc-header", methods=["POST"])
+def fix_strip_smc_header():
+    data = request.get_json(silent=True) or {}
+    system = data.get("system", "")
+    filename = data.get("filename", "")
+    if system not in {"snes", "satellaview", "sufami"}:
+        return jsonify({"error": "wrong_system", "detail": "Only snes/satellaview/sufami supported"}), 400
+    rom_path, err = _safe_rom_path(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
+    if not os.path.exists(rom_path):
+        return jsonify({"error": "not_found"}), 404
+    try:
+        with open(rom_path, "rb") as f:
+            data_bytes = f.read()
+    except OSError as e:
+        return jsonify({"error": "read_error", "detail": str(e)}), 500
+    size = len(data_bytes)
+    if not (size > 512 and size % 1024 == 512):
+        return jsonify({
+            "error": "no_header_detected",
+            "detail": f"File size {size} bytes does not match copier header pattern (size % 1024 != 512)",
+        }), 400
+    bak_path = rom_path + ".bak"
+    if not os.path.exists(bak_path):
+        try:
+            shutil.copy2(rom_path, bak_path)
+        except OSError as e:
+            return jsonify({"error": "backup_failed", "detail": str(e)}), 500
+    try:
+        with open(rom_path, "wb") as f:
+            f.write(data_bytes[512:])
+    except OSError as e:
+        return jsonify({"error": "write_error", "detail": str(e)}), 500
+    logger.info("Stripped 512-byte SMC copier header from %s (backup: %s)", rom_path, bak_path)
+    _remove_diag_from_cache(system, "smc_copier_header", filename)
+    return jsonify({"ok": True, "bytes_removed": 512, "backup": os.path.basename(bak_path)})
+
+
+@app.route("/api/fix/rename-bios", methods=["POST"])
+def fix_rename_bios():
+    data = request.get_json(silent=True) or {}
+    system = data.get("system", "")
+    actual_name = os.path.basename(data.get("actual_name", ""))
+    expected_name = os.path.basename(data.get("expected_name", ""))
+    if not all([system, actual_name, expected_name]):
+        return jsonify({"error": "missing_params"}), 400
+    if system not in BIOS_REQUIREMENTS:
+        return jsonify({"error": "invalid_system"}), 400
+    bios_entry = next(
+        (e for e in BIOS_REQUIREMENTS[system] if e["file"] == expected_name), None
+    )
+    if not bios_entry:
+        return jsonify({"error": "unknown_bios_file",
+                        "detail": f"{expected_name} is not a known BIOS file for {system}"}), 400
+    base_dir = os.path.join(_roms_root(), system) if bios_entry.get("in_roms") else _bios_root()
+    src = os.path.join(base_dir, actual_name)
+    dst = os.path.join(base_dir, expected_name)
+    if not os.path.exists(src):
+        return jsonify({"error": "not_found", "detail": f"{actual_name} not found"}), 404
+    if os.path.exists(dst):
+        return jsonify({"error": "target_exists", "detail": f"{expected_name} already exists"}), 409
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        return jsonify({"error": "rename_failed", "detail": str(e)}), 500
+    logger.info("Renamed BIOS: %s -> %s", src, dst)
+    return jsonify({"ok": True, "renamed": {"from": actual_name, "to": expected_name}})
+
+
+@app.route("/api/fix/upload-bios", methods=["POST"])
+def fix_upload_bios():
+    system = request.form.get("system", "").strip()
+    expected_filename = os.path.basename(request.form.get("expected_filename", "").strip())
+    uploaded = request.files.get("file")
+
+    if not all([system, expected_filename, uploaded]):
+        return jsonify({"error": "missing_params"}), 400
+    if system not in BIOS_REQUIREMENTS:
+        return jsonify({"error": "invalid_system"}), 400
+    bios_entry = next(
+        (e for e in BIOS_REQUIREMENTS[system] if e["file"] == expected_filename), None
+    )
+    if not bios_entry:
+        return jsonify({"error": "unknown_bios_file",
+                        "detail": f"{expected_filename} is not a known BIOS for {system}"}), 400
+
+    base_dir = os.path.join(_roms_root(), system) if bios_entry.get("in_roms") else _bios_root()
+    os.makedirs(base_dir, exist_ok=True)
+    dest_path = os.path.join(base_dir, expected_filename)
+
+    try:
+        data = uploaded.read()
+    except OSError as e:
+        return jsonify({"error": "read_error", "detail": str(e)}), 500
+
+    try:
+        with open(dest_path, "wb") as fh:
+            fh.write(data)
+    except OSError as e:
+        return jsonify({"error": "write_error", "detail": str(e)}), 500
+
+    # Soft MD5 validation — save succeeds; mismatch is a warning for regional variants
+    expected_md5 = bios_entry.get("md5")
+    md5_match = None
+    warning = None
+    if expected_md5:
+        actual_md5 = hashlib.md5(data).hexdigest()
+        md5_match = (actual_md5 == expected_md5)
+        if not md5_match:
+            warning = (f"Uploaded but MD5 differs from expected — may be wrong region. "
+                       f"Expected {expected_md5}, got {actual_md5}.")
+            logger.warning("BIOS upload MD5 mismatch for %s: expected %s, got %s",
+                           expected_filename, expected_md5, actual_md5)
+
+    logger.info("BIOS uploaded: %s -> %s (md5_match=%s)", expected_filename, dest_path, md5_match)
+    return jsonify({"ok": True, "filename": expected_filename,
+                    "md5_match": md5_match, "warning": warning})
+
+
+# ─── Knowledge Base Routes ────────────────────────────────────────────────────
+
+@app.route("/api/kb")
+def get_kb():
+    entries = {
+        key: {**sol, "key": key, "category": _kb_category(key)}
+        for key, sol in DIAGNOSTIC_SOLUTIONS.items()
+    }
+    return jsonify({"entries": entries, "count": len(entries)})
+
+
+@app.route("/api/kb/<issue_key>")
+def get_kb_entry(issue_key):
+    sol = DIAGNOSTIC_SOLUTIONS.get(issue_key)
+    if not sol:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({**sol, "key": issue_key, "category": _kb_category(issue_key)})
+
+
+@app.route("/api/version/check")
+def version_check():
+    """Check GitHub for a newer release. Caches result for _VERSION_CACHE_TTL seconds."""
+    import time
+
+    now = time.time()
+    if _version_cache.get("fetched_at") and now - _version_cache["fetched_at"] < _VERSION_CACHE_TTL:
+        return jsonify({k: v for k, v in _version_cache.items() if k != "fetched_at"})
+
+    url = "https://api.github.com/repos/crs2007/recalbox-manager/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": f"recalbox-manager/{APP_VERSION}",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Version check failed: {e}")
+        return jsonify({"error": "version_check_failed", "detail": str(e)}), 200
+
+    latest = data.get("tag_name", "").lstrip("v")
+    release_url = data.get("html_url", "")
+    body = data.get("body", "")
+    notes_short = body[:500] + ("…" if len(body) > 500 else "")
+    has_update = bool(latest and latest > APP_VERSION)
+
+    result = {
+        "current": APP_VERSION,
+        "latest": latest,
+        "has_update": has_update,
+        "release_url": release_url,
+        "release_notes_short": notes_short,
+    }
+    _version_cache.clear()
+    _version_cache.update(result)
+    _version_cache["fetched_at"] = now
+    return jsonify(result)
+
+
+@app.route("/api/kb/report", methods=["POST"])
+def kb_report():
+    """Store a session-local user report (title + summary). Never written to disk."""
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", "")).strip()[:200]
+    if not title:
+        return jsonify({"error": "title required"}), 400
+
+    summary = {
+        "title": title,
+        "timestamp": datetime.now().isoformat(),
+        "diag_count": sum(
+            len(si.get("diagnostic_issues", []))
+            for si in scan_cache.get("systems", {}).values()
+        ),
+        "systems_scanned": len(scan_cache.get("systems", {})),
+    }
+    user_reports.insert(0, summary)
+    while len(user_reports) > _USER_REPORTS_MAX:
+        user_reports.pop()
+
+    logger.info(f"User report logged: {title!r}")
+    return jsonify({"ok": True, "report": summary})
+
+
+@app.route("/api/kb/reports")
+def kb_reports():
+    """Return session-local user reports (newest first, max 20)."""
+    return jsonify({"reports": user_reports})
 
 
 # ─── Cover / Gamelist Routes ──────────────────────────────────────────────────
@@ -1599,6 +2161,90 @@ def update_gamelist():
     fields = {k: data.get(k) for k in ("name", "image", "thumbnail", "desc", "rating")}
     result = write_gamelist_entry(system, filename, fields)
     return jsonify(result)
+
+
+@app.route("/api/gamelist/repair", methods=["POST"])
+def repair_gamelist():
+    """
+    Repair a corrupted gamelist.xml by stripping trailing junk after </gameList>.
+    Creates a .bak backup before overwriting. Re-parses and refreshes scan cache.
+    """
+    data = request.json or {}
+    system = data.get("system")
+    if not system:
+        return jsonify({"error": "Missing system"}), 400
+
+    xml_path = os.path.join(_roms_root(), system, "gamelist.xml")
+    if not os.path.exists(xml_path):
+        return jsonify({"ok": False, "error": "not_found"}), 404
+
+    # Detect corruption and figure out how to fix it
+    try:
+        with open(xml_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError as e:
+        return jsonify({"ok": False, "error": "read_error", "detail": str(e)})
+
+    # Try parse as-is — if it works, nothing to repair
+    try:
+        ET.fromstring(raw)
+        return jsonify({"ok": True, "repaired": False, "detail": "Gamelist is already valid"})
+    except ET.ParseError as e:
+        parse_error = str(e)
+
+    # Strategy: strip trailing junk after last </gameList>
+    end_tag = "</gameList>"
+    idx = raw.rfind(end_tag)
+    if idx < 0:
+        return jsonify({"ok": False, "error": "unrepairable",
+                        "detail": f"No </gameList> closing tag found. Parse error: {parse_error}"})
+
+    trailing = raw[idx + len(end_tag):].strip()
+    fixed = raw[: idx + len(end_tag)] + "\n"
+
+    # Verify the fixed content parses
+    try:
+        ET.fromstring(fixed)
+    except ET.ParseError as e:
+        return jsonify({"ok": False, "error": "repair_failed",
+                        "detail": f"Stripping trailing junk did not produce valid XML: {e}"})
+
+    # Write atomically with .bak backup
+    bak_path = xml_path + ".bak"
+    tmp_path = xml_path + ".tmp"
+    try:
+        shutil.copy2(xml_path, bak_path)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(fixed)
+        os.replace(tmp_path, xml_path)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": "write_error", "detail": str(e)})
+
+    logger.info(f"Repaired gamelist.xml for {system} (removed {len(trailing)} bytes of trailing junk)")
+
+    # Refresh in-memory cache
+    scan_cache["gamelists"][system] = parse_gamelist(system)
+
+    # Remove the corresponding issue from scan_cache
+    scan_cache["issues"] = [
+        i for i in scan_cache.get("issues", [])
+        if not (i.get("type") == "corrupted_gamelist" and i.get("system") == system)
+    ]
+    if scan_cache.get("stats"):
+        scan_cache["stats"]["total_issues"] = len(scan_cache["issues"])
+
+    return jsonify({
+        "ok": True,
+        "repaired": True,
+        "trailing_bytes": len(trailing),
+        "trailing_preview": trailing[:80],
+        "backup_path": os.path.basename(bak_path),
+    })
 
 
 def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
@@ -1928,9 +2574,292 @@ def fetch_bootleggames_description(rom_filename, game_name=""):
     return {"ok": True, "desc": extract, "source": "bootleggames"}
 
 
+# ---------------------------------------------------------------------------
+# Sega Fandom Wiki helpers
+# ---------------------------------------------------------------------------
+
+SEGA_SYSTEMS = {
+    "megadrive", "genesis", "mastersystem", "gamegear",
+    "sg1000", "sega32x", "segacd", "saturn", "dreamcast",
+    "naomi", "atomiswave",
+}
+
+
+def _sega_fandom_search(search_name):
+    """Run opensearch on sega.fandom.com. Returns page title or None."""
+    ua = {"User-Agent": f"recalbox-manager/{APP_VERSION}"}
+    search_url = (
+        "https://sega.fandom.com/api.php?"
+        + urllib.parse.urlencode({
+            "action": "opensearch",
+            "search": search_name,
+            "limit": "3",
+            "format": "json",
+        })
+    )
+    with urllib.request.urlopen(
+        urllib.request.Request(search_url, headers=ua), timeout=10
+    ) as resp:
+        search_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    titles = search_data[1] if len(search_data) > 1 else []
+    return titles[0] if titles else None
+
+
+def fetch_sega_fandom_description(rom_filename, game_name=""):
+    """
+    Fetch game description from Sega Fandom Wiki as a fallback.
+    Uses MediaWiki opensearch + extracts API — no auth required.
+    Returns {ok, desc?, error?}.
+    Never raises — all errors returned in dict.
+    """
+    search_name = game_name or _clean_rom_name(rom_filename)
+    if not search_name:
+        return {"ok": False, "error": "no_name"}
+
+    ua = {"User-Agent": f"recalbox-manager/{APP_VERSION}"}
+
+    # Step 1: opensearch to find best matching page title
+    try:
+        page_title = _sega_fandom_search(search_name)
+    except Exception as e:
+        return {"ok": False, "error": "sega_fandom_down", "detail": str(e)}
+
+    if not page_title:
+        return {"ok": False, "error": "not_found"}
+
+    # Step 2: fetch plain-text intro extract for the page
+    extract_url = (
+        "https://sega.fandom.com/api.php?"
+        + urllib.parse.urlencode({
+            "action": "query",
+            "prop": "extracts",
+            "exintro": "true",
+            "explaintext": "true",
+            "titles": page_title,
+            "format": "json",
+        })
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(extract_url, headers=ua), timeout=10
+        ) as resp:
+            extract_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return {"ok": False, "error": "sega_fandom_down", "detail": str(e)}
+
+    pages = extract_data.get("query", {}).get("pages", {})
+    if not pages:
+        return {"ok": False, "error": "not_found"}
+
+    page = next(iter(pages.values()))
+    extract = (page.get("extract") or "").strip()
+    if not extract:
+        return {"ok": False, "error": "not_found"}
+
+    logger.info(f"Got description for {rom_filename} from Sega Fandom Wiki ({len(extract)} chars)")
+    return {"ok": True, "desc": extract, "source": "sega_fandom"}
+
+
+def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
+    """
+    Fetch cover image from Sega Fandom Wiki page.
+    Uses pageimages API for the primary thumbnail, falls back to parsing
+    the page's image list for the first .png/.jpg.
+    Returns {ok, image_path?, cover_url?, img_filename?, error?}.
+    Never raises — all errors returned in dict.
+    """
+    search_name = game_name or _clean_rom_name(rom_filename)
+    if not search_name:
+        return {"ok": False, "error": "no_name"}
+
+    ua = {"User-Agent": f"recalbox-manager/{APP_VERSION}"}
+
+    # Step 1: opensearch to find page
+    try:
+        page_title = _sega_fandom_search(search_name)
+    except Exception as e:
+        return {"ok": False, "error": "sega_fandom_down", "detail": str(e)}
+
+    if not page_title:
+        return {"ok": False, "error": "not_found"}
+
+    # Step 2: try pageimages API (primary thumbnail)
+    img_url = None
+    pi_url = (
+        "https://sega.fandom.com/api.php?"
+        + urllib.parse.urlencode({
+            "action": "query",
+            "prop": "pageimages",
+            "pithumbsize": "500",
+            "pilicense": "any",
+            "titles": page_title,
+            "format": "json",
+        })
+    )
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(pi_url, headers=ua), timeout=10
+        ) as resp:
+            pi_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        pages = pi_data.get("query", {}).get("pages", {})
+        if pages:
+            page = next(iter(pages.values()))
+            thumb = page.get("thumbnail", {})
+            img_url = thumb.get("source")
+    except Exception as e:
+        logger.warning(f"Sega Fandom pageimages failed: {e}")
+
+    # Step 3: fallback — parse page images list for first .png/.jpg
+    if not img_url:
+        parse_url = (
+            "https://sega.fandom.com/api.php?"
+            + urllib.parse.urlencode({
+                "action": "parse",
+                "prop": "images",
+                "page": page_title,
+                "format": "json",
+            })
+        )
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(parse_url, headers=ua), timeout=10
+            ) as resp:
+                parse_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            images = parse_data.get("parse", {}).get("images", [])
+            for img_name in images:
+                if img_name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    img_url = (
+                        "https://sega.fandom.com/wiki/Special:FilePath/"
+                        + urllib.parse.quote(img_name, safe="")
+                    )
+                    break
+        except Exception as e:
+            logger.warning(f"Sega Fandom parse/images failed: {e}")
+
+    if not img_url:
+        return {"ok": False, "error": "not_found"}
+
+    # Step 4: download the image
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(img_url, headers=ua), timeout=15
+        ) as resp:
+            img_data = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"ok": False, "error": "not_found"}
+        return {"ok": False, "error": "sega_fandom_down", "detail": f"HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        if "timed out" in str(e).lower():
+            return {"ok": False, "error": "timeout"}
+        return {"ok": False, "error": "sega_fandom_down", "detail": str(e)}
+
+    # Determine extension from content type or URL
+    if "png" in content_type:
+        ext = ".png"
+    elif "jpeg" in content_type or "jpg" in content_type:
+        ext = ".jpg"
+    else:
+        ext = os.path.splitext(urllib.parse.urlparse(img_url).path)[1] or ".png"
+
+    rom_stem = os.path.splitext(rom_filename)[0]
+    img_filename = rom_stem + ext
+    img_dir = os.path.join(_roms_root(), system_key, "media", "images")
+    os.makedirs(img_dir, exist_ok=True)
+    img_path = os.path.join(img_dir, img_filename)
+    try:
+        with open(img_path, "wb") as f:
+            f.write(img_data)
+    except OSError as e:
+        return {"ok": False, "error": "write_error", "detail": str(e)}
+
+    logger.info(f"[Sega Fandom] Saved cover for {rom_filename} -> {img_path}")
+    cover_url = _cover_url_for(system_key, f"./media/images/{img_filename}")
+    return {"ok": True, "image_path": img_path, "cover_url": cover_url,
+            "img_filename": img_filename, "source": "sega_fandom"}
+
+
+# ---------------------------------------------------------------------------
+# Generalized fallback scrape chain
+# ---------------------------------------------------------------------------
+
+# Errors that mean "this source can't help, try next" vs. transient failures
+FALLBACK_ERRORS = {"not_found", "no_credentials", "no_devid", "unsupported_system"}
+
+SCRAPE_SOURCES = [
+    {
+        "name": "ScreenScraper",
+        "cover_fn": fetch_screenscraper_cover,
+        "desc_fn": fetch_screenscraper_description,
+        "types": {"cover", "desc"},
+        "systems": None,  # all systems
+    },
+    {
+        "name": "Libretro Thumbnails",
+        "cover_fn": fetch_libretro_cover,
+        "types": {"cover"},
+        "systems": None,
+    },
+    {
+        "name": "Sega Fandom Wiki",
+        "cover_fn": fetch_sega_fandom_cover,
+        "desc_fn": fetch_sega_fandom_description,
+        "types": {"cover", "desc"},
+        "systems": SEGA_SYSTEMS,
+    },
+    {
+        "name": "Bootleg Games Wiki",
+        "desc_fn": fetch_bootleggames_description,
+        "types": {"desc"},
+        "systems": None,
+    },
+]
+
+
+def _run_fallback_chain(scrape_type, system_key, rom_filename, game_name=""):
+    """
+    Walk SCRAPE_SOURCES in order for the given scrape_type ("cover" or "desc").
+    Skip sources that don't support this type or don't apply to this system.
+    Stop at first success or non-fallback error (rate_limit, timeout, etc.).
+    Returns the result dict from the winning source.
+    """
+    fn_key = f"{scrape_type}_fn"  # "cover_fn" or "desc_fn"
+    last_result = {"ok": False, "error": "no_sources"}
+
+    for source in SCRAPE_SOURCES:
+        if scrape_type not in source.get("types", set()):
+            continue
+        if source.get("systems") and system_key not in source["systems"]:
+            continue
+        fn = source.get(fn_key)
+        if not fn:
+            continue
+
+        # Call with appropriate signature
+        if scrape_type == "cover":
+            result = fn(system_key, rom_filename, game_name)
+        else:
+            result = fn(rom_filename, game_name)
+
+        if result["ok"]:
+            logger.info(f"[{source['name']}] Success for {rom_filename}")
+            return result
+
+        last_result = result
+        if result.get("error") not in FALLBACK_ERRORS:
+            # Transient error (rate_limit, timeout, down) — don't try more sources
+            logger.warning(f"[{source['name']}] Non-fallback error for {rom_filename}: {result.get('error')}")
+            return result
+
+        logger.info(f"[{source['name']}] miss ({result.get('error')}) for {rom_filename}, trying next...")
+
+    return last_result
+
+
 @app.route("/api/covers/scrape", methods=["POST"])
 def scrape_cover():
-    """Fetch cover art from ScreenScraper for one ROM and update gamelist.xml."""
+    """Fetch cover art for one ROM using the fallback source chain."""
     data = request.json or {}
     filename = data.get("filename")
     system = data.get("system")
@@ -1939,14 +2868,7 @@ def scrape_cover():
     if not filename or not system:
         return jsonify({"error": "Missing filename or system"}), 400
 
-    result = fetch_screenscraper_cover(system, filename, game_name)
-
-    # Fallback to Libretro Thumbnails when ScreenScraper can't help
-    if not result["ok"] and result.get("error") in (
-        "not_found", "no_credentials", "no_devid", "unsupported_system"
-    ):
-        logger.info(f"ScreenScraper miss ({result.get('error')}) for {filename}, trying Libretro Thumbnails...")
-        result = fetch_libretro_cover(system, filename, game_name)
+    result = _run_fallback_chain("cover", system, filename, game_name)
 
     if not result["ok"]:
         return jsonify(result)
@@ -1995,7 +2917,7 @@ def scrape_cover():
 
 @app.route("/api/descriptions/scrape", methods=["POST"])
 def scrape_description():
-    """Fetch description from ScreenScraper for one ROM and update gamelist.xml."""
+    """Fetch description for one ROM using the fallback source chain."""
     data = request.json or {}
     filename = data.get("filename")
     system = data.get("system")
@@ -2004,14 +2926,7 @@ def scrape_description():
     if not filename or not system:
         return jsonify({"error": "Missing filename or system"}), 400
 
-    result = fetch_screenscraper_description(system, filename, game_name)
-
-    # Fallback to Bootleg Games Wiki when ScreenScraper can't help
-    if not result["ok"] and result.get("error") in (
-        "not_found", "no_credentials", "no_devid", "unsupported_system"
-    ):
-        logger.info(f"ScreenScraper miss ({result.get('error')}) for {filename}, trying Bootleg Games Wiki...")
-        result = fetch_bootleggames_description(filename, game_name)
+    result = _run_fallback_chain("desc", system, filename, game_name)
 
     if not result["ok"]:
         return jsonify(result)
@@ -2055,6 +2970,102 @@ def scrape_description():
     return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
 
 
+@app.route("/api/covers/download-url", methods=["POST"])
+def download_cover_from_url():
+    """Download a cover image from a user-provided URL and save to gamelist."""
+    data = request.json or {}
+    system = data.get("system")
+    filename = data.get("filename")
+    image_url = data.get("image_url", "")
+
+    if not system or not filename:
+        return jsonify({"error": "Missing system or filename"}), 400
+    if not image_url:
+        return jsonify({"error": "Missing image_url"}), 400
+
+    # Security: only allow http/https
+    parsed = urllib.parse.urlparse(image_url)
+    if parsed.scheme not in ("http", "https"):
+        return jsonify({"ok": False, "error": "invalid_url", "detail": "Only http/https URLs are allowed"}), 400
+
+    # Download the image (10MB limit, 15s timeout)
+    MAX_SIZE = 10 * 1024 * 1024
+    req = urllib.request.Request(image_url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            img_data = resp.read(MAX_SIZE + 1)
+            if len(img_data) > MAX_SIZE:
+                return jsonify({"ok": False, "error": "too_large", "detail": "Image exceeds 10MB limit"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": "download_failed", "detail": str(e)})
+
+    # Validate image magic bytes
+    MAGIC = {
+        b"\x89PNG": ".png",
+        b"\xff\xd8\xff": ".jpg",
+        b"GIF8": ".gif",
+        b"RIFF": ".webp",
+    }
+    img_ext = None
+    for magic, ext in MAGIC.items():
+        if img_data[:len(magic)] == magic:
+            img_ext = ext
+            break
+    if not img_ext:
+        return jsonify({"ok": False, "error": "invalid_image", "detail": "File does not appear to be a valid image (PNG/JPEG/GIF/WebP)"})
+
+    # Save to <system>/media/images/<rom_stem><ext>
+    rom_stem = os.path.splitext(filename)[0]
+    # Sanitize stem to prevent path traversal
+    rom_stem = re.sub(r'[/\\:*?"<>|]', '_', rom_stem)
+    img_filename = rom_stem + img_ext
+    img_dir = os.path.join(_roms_root(), system, "media", "images")
+    os.makedirs(img_dir, exist_ok=True)
+    img_path = os.path.join(img_dir, img_filename)
+
+    try:
+        with open(img_path, "wb") as f:
+            f.write(img_data)
+    except OSError as e:
+        return jsonify({"ok": False, "error": "write_error", "detail": str(e)})
+
+    logger.info(f"Downloaded cover from URL for {filename} -> {img_path}")
+
+    image_rel = f"./media/images/{img_filename}"
+    cover_url = _cover_url_for(system, image_rel)
+
+    # Get existing game_name from gamelist if available
+    gl = scan_cache.get("gamelists", {}).get(system, {})
+    gl_entry = gl.get(rom_stem.lower())
+    game_name = gl_entry.get("name", "") if gl_entry else ""
+
+    write_result = write_gamelist_entry(system, filename, {
+        "name": game_name or rom_stem,
+        "image": image_rel,
+    })
+
+    # Update in-memory cache
+    if write_result.get("ok"):
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if sys_info:
+            for rom in sys_info.get("roms", []):
+                if rom["name"] == filename:
+                    rom["has_cover"] = True
+                    rom["cover_url"] = cover_url
+                    break
+            sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
+        if scan_cache.get("stats"):
+            scan_cache["stats"]["total_with_covers"] = sum(
+                s.get("cover_count", 0) for s in scan_cache.get("systems", {}).values()
+            )
+            scan_cache["stats"]["total_missing_covers"] = sum(
+                sum(1 for r in s.get("roms", []) if not r.get("has_cover") and r.get("issue") is None)
+                for s in scan_cache.get("systems", {}).values()
+            )
+
+    return jsonify({"ok": True, "cover_url": cover_url, "gamelist_updated": write_result.get("ok", False)})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5123))
     # FLASK_RELOADER=false disables Werkzeug's reloader (used by test fixtures to
@@ -2063,4 +3074,10 @@ if __name__ == "__main__":
     logger.info(f"Starting Recalbox ROM Manager on http://localhost:{port}")
     logger.info(f"Recalbox share path: {_config['share']}")
     logger.info(f"ROMs root: {_roms_root()}")
+    if not PY7ZR_AVAILABLE:
+        logger.warning(
+            "py7zr is NOT installed — .7z archives cannot be inspected. "
+            "Wrong-content issues inside .7z files will be silently skipped. "
+            "Run: pip install py7zr"
+        )
     app.run(host="0.0.0.0", port=port, debug=True, use_reloader=use_reloader)
