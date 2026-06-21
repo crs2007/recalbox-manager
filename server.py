@@ -20,6 +20,9 @@ except ImportError:
     py7zr = None
     PY7ZR_AVAILABLE = False
 import mimetypes
+import socket
+import ipaddress
+import threading
 import configparser
 import xml.etree.ElementTree as ET
 import urllib.request
@@ -31,7 +34,10 @@ from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
 
 app = Flask(__name__, static_folder="static", static_url_path="")
-CORS(app)
+# Scope CORS to localhost only. The UI is served same-origin, so cross-origin access is
+# never needed — a wildcard would let any website the user visits drive the (unauthenticated)
+# API via the browser.
+CORS(app, origins=[r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"])
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -57,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.04.23"
+APP_VERSION = "2026.06.3"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -633,6 +639,30 @@ scan_cache = {
     "gamelists": {},
 }
 
+# Guards mutation of scan_cache and the gamelist.xml read-modify-write. Werkzeug serves
+# requests on multiple threads, so a scan racing a move/scrape — or two gamelist writes for
+# the same system — would otherwise corrupt state or lose updates. Reentrant so a holder can
+# call other guarded helpers.
+_cache_lock = threading.RLock()
+
+# ─── Scan Progress ──────────────────────────────────────────────────────────────
+# Live progress for the two-phase background scan, polled by the frontend via
+# GET /api/scan/progress. Mutated only under _cache_lock.
+#   phase: None | "inventory" (fast metadata pass) | "deep" (dedup + content diagnostics)
+#          | "done" | "error"
+scan_progress = {
+    "running": False,
+    "phase": None,
+    "systems_total": 0,
+    "systems_done": 0,
+    "current_system": None,
+    "files_so_far": 0,
+    "error": None,
+    "started_at": None,
+    "last_scan": None,
+}
+_scan_thread: threading.Thread | None = None
+
 # ─── Session-Local User Reports ───────────────────────────────────────────────
 # Ephemeral — never written to disk, lost on restart. Max 20 entries.
 user_reports: list[dict] = []
@@ -656,6 +686,34 @@ def get_file_hash(filepath: str, block_size: int = _HASH_BLOCK_SIZE) -> str | No
         return h.hexdigest()
     except (OSError, IOError):
         return None
+
+
+def files_identical(path_a: str, path_b: str) -> bool:
+    """Return True only if two files have identical size AND identical full-file content.
+
+    The quick first-block hash (get_file_hash) is fine for *grouping* duplicate candidates,
+    but it must never be used to decide whether a file can be safely trashed: two different
+    ROMs routinely share an identical first 64 KB (same internal header, intro, or padding).
+    This streams both files and short-circuits on the first differing byte.
+    """
+    try:
+        sa = os.path.getsize(path_a)
+        sb = os.path.getsize(path_b)
+    except OSError:
+        return False
+    if sa != sb:
+        return False
+    try:
+        with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+            while True:
+                ba = fa.read(_HASH_BLOCK_SIZE)
+                bb = fb.read(_HASH_BLOCK_SIZE)
+                if ba != bb:
+                    return False
+                if not ba:
+                    return True
+    except (OSError, IOError):
+        return False
 
 
 def check_bios_status() -> dict:
@@ -750,23 +808,34 @@ def _list_archive_contents(path: str, ext: str) -> list[str] | None:
                 return None
             with py7zr.SevenZipFile(path, mode="r") as sz:
                 return sz.getnames()
-    except (OSError, IOError, zipfile.BadZipFile, Exception):
+    except Exception:
+        # Archives are arbitrary, attacker-influenced input; any failure (bad header,
+        # truncation, py7zr-specific errors) means "unreadable" — return None deliberately.
         return None
 
 
-def run_rom_diagnostics(system_key: str, system_path: str, roms: list[dict]) -> list[dict]:
+def run_rom_diagnostics(
+    system_key: str, system_path: str, roms: list[dict], all_names: set[str] | None = None
+) -> list[dict]:
     """
     Analyse files in a system folder and return a list of diagnostic issues.
     Each issue: {key, file, solution_title, description}
     Also augments each rom_info dict in-place with a 'diagnostics' list.
+
+    `all_names` is the set of filenames in the folder; when omitted it is gathered via
+    os.scandir. Callers that already enumerated the folder (the Phase 1 inventory) should
+    pass it to avoid a second network round-trip over SMB. The only filenames the checks
+    below consult are ROM-type extensions (.bin/.cue/.chd/.m3u/...), which are all present
+    in the `roms` list, so deriving the set from `roms` is equivalent for diagnostics.
     """
     diag_issues = []
 
     # Build a set of filenames present in this folder for fast lookup
-    try:
-        all_names = {e.name for e in os.scandir(system_path) if e.is_file()}
-    except OSError:
-        return diag_issues
+    if all_names is None:
+        try:
+            all_names = {e.name for e in os.scandir(system_path) if e.is_file()}
+        except OSError:
+            return diag_issues
 
     # Index roms by name for quick in-place augmentation
     rom_map = {r["name"]: r for r in roms}
@@ -825,7 +894,7 @@ def run_rom_diagnostics(system_key: str, system_path: str, roms: list[dict]) -> 
         mpath = os.path.join(system_path, mname)
         try:
             with open(mpath, "r", encoding="utf-8", errors="ignore") as f:
-                lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+                lines = [s for s in (l.strip() for l in f) if s and not s.startswith("#")]
             missing_refs = [l for l in lines if not os.path.exists(os.path.join(system_path, l))]
             if missing_refs:
                 diag = {
@@ -1048,6 +1117,8 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
             else:
                 raise
         root = tree.getroot()
+        # First pass: collect entries and resolve absolute image paths (no I/O yet).
+        pending = []
         for game in root.findall("game"):
             path_el = game.find("path")
             if path_el is None or not path_el.text:
@@ -1067,14 +1138,36 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
             game_desc = desc_el.text if desc_el is not None and desc_el.text else ""
 
             # Resolve image path relative to the system folder (strip leading ./)
-            image_exists = False
             if image_rel:
                 image_clean = image_rel.lstrip("./").lstrip("\\").replace("/", os.sep)
                 image_abs = os.path.join(_roms_root(), system_dir, image_clean)
-                image_exists = os.path.exists(image_abs)
             else:
                 image_abs = None
 
+            pending.append((stem, basename, game_name, image_rel, image_abs,
+                            thumbnail_rel, game_desc))
+
+        # Batch existence check: scandir each distinct image directory once (usually a single
+        # media folder) instead of one os.path.exists() per game — over SMB that is N network
+        # round-trips collapsed into a handful.
+        dir_listings: dict[str, set[str]] = {}
+        for entry in pending:
+            image_abs = entry[4]
+            if not image_abs:
+                continue
+            d = os.path.dirname(image_abs)
+            if d not in dir_listings:
+                try:
+                    dir_listings[d] = {e.name for e in os.scandir(d)}
+                except OSError:
+                    dir_listings[d] = set()
+
+        for (stem, basename, game_name, image_rel, image_abs,
+             thumbnail_rel, game_desc) in pending:
+            image_exists = bool(
+                image_abs
+                and os.path.basename(image_abs) in dir_listings.get(os.path.dirname(image_abs), ())
+            )
             result[stem] = {
                 "path": basename,
                 "name": game_name,
@@ -1098,19 +1191,53 @@ def _cover_url_for(system_dir, image_rel):
     return f"/api/covers/image/{urllib.parse.quote(system_dir, safe='')}/{urllib.parse.quote(img_basename, safe='')}"
 
 
-def scan_roms() -> dict:
-    """Scan all ROM directories and build inventory. Returns the updated scan_cache dict."""
-    logger.info(f"Starting ROM scan at {_roms_root()}")
-    systems = {}
-    issues = []
-    all_hashes = defaultdict(list)  # hash -> list of (system, filename)
-    total_files = 0
-    total_size = 0
+def _compute_stats() -> dict:
+    """Recompute the stats block from the current scan_cache. Call under _cache_lock.
+
+    Derives every total from the committed systems / issues / duplicates, so it produces a
+    correct *partial* stats block after Phase 1 (duplicates + diagnostics still 0) and the
+    full block after Phase 2 — no separate accumulators to keep in sync."""
+    systems = scan_cache.get("systems", {})
+    issues = scan_cache.get("issues", [])
+    duplicates = scan_cache.get("duplicates", [])
+    total_size_bytes = sum(
+        r.get("size", 0) for s in systems.values() for r in s.get("roms", [])
+    )
+    return {
+        "total_systems": len(systems),
+        "total_files": sum(s.get("total_roms", 0) for s in systems.values()),
+        "total_size": format_size(total_size_bytes),
+        "total_misplaced": sum(s.get("misplaced_count", 0) for s in systems.values()),
+        "total_duplicates": len(duplicates),
+        "total_issues": len(issues),
+        "total_ignored": sum(s.get("ignored_count", 0) for s in systems.values()),
+        "total_diagnostics": sum(s.get("diagnostic_count", 0) for s in systems.values()),
+        "total_with_covers": sum(s.get("cover_count", 0) for s in systems.values()),
+        "total_missing_covers": sum(
+            sum(1 for r in s.get("roms", []) if not r.get("has_cover") and r.get("issue") is None)
+            for s in systems.values()
+        ),
+        "total_with_descriptions": sum(s.get("description_count", 0) for s in systems.values()),
+        "total_missing_descriptions": sum(
+            sum(1 for r in s.get("roms", []) if not r.get("has_description") and r.get("issue") is None)
+            for s in systems.values()
+        ),
+    }
+
+
+def _scan_inventory() -> dict:
+    """Phase 1 — fast, metadata-only inventory.
+
+    Enumerates each system folder with a single os.scandir (size comes back for free on
+    Windows/SMB) and does extension-based placement detection + gamelist lookups. Does **no**
+    per-file content reads (no hashing, no diagnostics) — that is deferred to Phase 2. Commits
+    each system to scan_cache as soon as it is enumerated and updates scan_progress, so the UI
+    can render systems one-by-one. Returns {"ok": True} or {"error": ...}."""
+    logger.info(f"Starting ROM inventory at {_roms_root()}")
 
     if not os.path.exists(_roms_root()):
         logger.error(f"ROMs root not found: {_roms_root()}")
         return {"error": f"Cannot access {_roms_root()}. Is the Recalbox on and network share accessible?"}
-
     try:
         system_dirs = sorted([
             d for d in os.listdir(_roms_root())
@@ -1118,6 +1245,23 @@ def scan_roms() -> dict:
         ])
     except PermissionError:
         return {"error": f"Permission denied accessing {_roms_root()}"}
+
+    # Reset accumulators so stale results from a previous scan don't linger while this one runs.
+    with _cache_lock:
+        scan_cache["systems"] = {}
+        scan_cache["issues"] = []
+        scan_cache["duplicates"] = []
+        scan_cache["gamelists"] = {}
+        scan_progress.update({
+            "phase": "inventory",
+            "systems_total": len(system_dirs),
+            "systems_done": 0,
+            "current_system": None,
+            "files_so_far": 0,
+        })
+
+    issues: list[dict] = []
+    total_files = 0
 
     for system_dir in system_dirs:
         system_path = os.path.join(_roms_root(), system_dir)
@@ -1133,7 +1277,6 @@ def scan_roms() -> dict:
         # Load gamelist.xml once per system for cover/metadata lookups
         gl_info: dict = {}
         gamelist = parse_gamelist(system_dir, info=gl_info)
-        scan_cache["gamelists"][system_dir] = gamelist
         if gl_info.get("corrupted"):
             issues.append({
                 "type": "corrupted_gamelist",
@@ -1159,7 +1302,6 @@ def scan_roms() -> dict:
                         size = 0
 
                     total_files += 1
-                    total_size += size
 
                     # Detect suggested systems for this extension
                     suggested = list(EXTENSION_TO_SYSTEMS.get(ext, set()) - {system_key})
@@ -1211,23 +1353,18 @@ def scan_roms() -> dict:
 
                     roms.append(rom_info)
 
-                    # Hash for duplicate detection (skip very large files)
-                    if size < _LARGE_FILE_THRESHOLD:
-                        fhash = get_file_hash(entry.path)
-                        if fhash:
-                            all_hashes[fhash].append((system_dir, entry.name, size))
-
         except PermissionError:
             issues.append({"type": "permission_error", "system": system_dir})
+            with _cache_lock:
+                scan_cache["issues"] = list(issues)
+                scan_progress["systems_done"] += 1
+                scan_progress["current_system"] = system_dir
+                scan_progress["files_so_far"] = total_files
             continue
-
-        # Run per-system ROM diagnostics (augments roms in-place)
-        diag_issues = run_rom_diagnostics(system_key, system_path, roms)
-        diag_count = len(diag_issues)
 
         cover_count = sum(1 for r in roms if r.get("has_cover"))
         description_count = sum(1 for r in roms if r.get("has_description"))
-        systems[system_dir] = {
+        sys_entry = {
             "name": SYSTEM_DISPLAY_NAMES.get(system_key, system_dir),
             "folder": system_dir,
             "known": known_system,
@@ -1236,68 +1373,210 @@ def scan_roms() -> dict:
             "unknown_count": len(unknown_ext),
             "ignored_count": ignored_count,
             "ok_count": len(roms) - len(misplaced) - len(unknown_ext),
-            "diagnostic_count": diag_count,
+            "diagnostic_count": 0,        # filled in by Phase 2
             "cover_count": cover_count,
             "description_count": description_count,
             "roms": roms,
             "valid_extensions": sorted(valid_exts) if valid_exts else [],
-            "diagnostic_issues": diag_issues,
+            "diagnostic_issues": [],      # filled in by Phase 2
+            "deep_pending": True,         # cleared by Phase 2 once diagnostics run
         }
+        with _cache_lock:
+            scan_cache["systems"][system_dir] = sys_entry
+            scan_cache["gamelists"][system_dir] = gamelist
+            scan_cache["issues"] = list(issues)
+            scan_cache["stats"] = _compute_stats()
+            scan_progress["systems_done"] += 1
+            scan_progress["current_system"] = system_dir
+            scan_progress["files_so_far"] = total_files
 
-    # Find duplicates
+    # Inventory complete — publish last_scan + partial stats so the UI is fully usable now.
+    with _cache_lock:
+        scan_cache["last_scan"] = datetime.now().isoformat()
+        scan_cache["stats"] = _compute_stats()
+
+    logger.info(f"Inventory complete: {total_files} files across {len(system_dirs)} folders")
+    return {"ok": True}
+
+
+def _scan_deep() -> None:
+    """Phase 2 — content analysis (runs after Phase 1, while the inventory is already visible).
+
+    Two passes over the already-enumerated systems:
+      1. Per-system ROM diagnostics (reusing the Phase 1 file list — no second scandir).
+      2. Duplicate detection with a size pre-filter: files with a unique size cannot be
+         duplicates, so only files whose size collides with another file are hashed. This
+         eliminates the large majority of the 64 KB hash reads on a typical collection.
+    Updates scan_cache (per-system diagnostic counts, then duplicates) and stats in place so
+    the UI counts climb as each step finishes."""
+    with _cache_lock:
+        system_keys = list(scan_cache.get("systems", {}).keys())
+        scan_progress.update({
+            "phase": "deep",
+            "systems_total": len(system_keys),
+            "systems_done": 0,
+            "current_system": None,
+        })
+
+    # --- Pass 1: per-system diagnostics ---
+    for system_dir in system_keys:
+        with _cache_lock:
+            sys_info = scan_cache.get("systems", {}).get(system_dir)
+        if not sys_info:
+            with _cache_lock:
+                scan_progress["systems_done"] += 1
+            continue
+        system_key = system_dir.lower()
+        system_path = os.path.join(_roms_root(), system_dir)
+        roms = sys_info["roms"]
+        all_names = {r["name"] for r in roms}
+        diag_issues = run_rom_diagnostics(system_key, system_path, roms, all_names=all_names)
+        with _cache_lock:
+            sys_info["diagnostic_count"] = len(diag_issues)
+            sys_info["diagnostic_issues"] = diag_issues
+            sys_info["deep_pending"] = False
+            scan_cache["stats"] = _compute_stats()
+            scan_progress["systems_done"] += 1
+            scan_progress["current_system"] = system_dir
+
+    # --- Pass 2: duplicate detection (size pre-filter, then hash candidates) ---
+    size_index: dict[int, list] = defaultdict(list)
+    with _cache_lock:
+        for system_dir, sys_info in scan_cache.get("systems", {}).items():
+            for rom in sys_info["roms"]:
+                if rom["size"] < _LARGE_FILE_THRESHOLD:
+                    size_index[rom["size"]].append(
+                        (system_dir, rom["name"], rom["path"], rom["size"])
+                    )
+
+    all_hashes: dict[str, list] = defaultdict(list)
+    for size, group in size_index.items():
+        if len(group) < 2:
+            continue  # unique size — cannot be a duplicate, skip the hash read entirely
+        for (s, name, path, sz) in group:
+            fhash = get_file_hash(path)
+            if fhash:
+                all_hashes[fhash].append((s, name, sz))
+
     duplicates = []
+    dup_issues = []
     for fhash, locations in all_hashes.items():
         if len(locations) > 1:
             duplicates.append({
                 "hash": fhash,
                 "copies": [{"system": s, "file": f, "size_human": format_size(sz)} for s, f, sz in locations],
             })
-            issues.append({
+            dup_issues.append({
                 "type": "duplicate",
                 "hash": fhash,
                 "copies": [{"system": s, "file": f} for s, f, sz in locations],
             })
 
-    total_diagnostics = sum(s["diagnostic_count"] for s in systems.values())
-    total_with_covers = sum(s["cover_count"] for s in systems.values())
-    total_missing_covers = sum(
-        sum(1 for r in s["roms"] if not r.get("has_cover") and r.get("issue") is None)
-        for s in systems.values()
-    )
-    total_with_descriptions = sum(s["description_count"] for s in systems.values())
-    total_missing_descriptions = sum(
-        sum(1 for r in s["roms"] if not r.get("has_description") and r.get("issue") is None)
-        for s in systems.values()
-    )
-
-    stats = {
-        "total_systems": len(systems),
-        "total_files": total_files,
-        "total_size": format_size(total_size),
-        "total_misplaced": sum(s["misplaced_count"] for s in systems.values()),
-        "total_duplicates": len(duplicates),
-        "total_issues": len(issues),
-        "total_ignored": sum(s["ignored_count"] for s in systems.values()),
-        "total_diagnostics": total_diagnostics,
-        "total_with_covers": total_with_covers,
-        "total_missing_covers": total_missing_covers,
-        "total_with_descriptions": total_with_descriptions,
-        "total_missing_descriptions": total_missing_descriptions,
-    }
-
-    scan_cache.update({
-        "last_scan": datetime.now().isoformat(),
-        "systems": systems,
-        "issues": issues,
-        "duplicates": duplicates,
-        "stats": stats,
-    })
+    with _cache_lock:
+        scan_cache["duplicates"] = duplicates
+        # Keep Phase 1 placement/gamelist issues; replace only the duplicate entries.
+        non_dup = [i for i in scan_cache.get("issues", []) if i.get("type") != "duplicate"]
+        scan_cache["issues"] = non_dup + dup_issues
+        scan_cache["stats"] = _compute_stats()
+        stats = scan_cache["stats"]
 
     logger.info(
-        f"Scan complete: {stats['total_files']} files across {stats['total_systems']} systems, "
-        f"{stats['total_issues']} issues, {total_diagnostics} diagnostic findings"
+        f"Deep analysis complete: {stats.get('total_duplicates', 0)} duplicate groups, "
+        f"{stats.get('total_diagnostics', 0)} diagnostic findings"
     )
+
+
+def scan_roms() -> dict:
+    """Run a full scan (inventory + deep analysis) synchronously and return scan_cache,
+    or {"error": ...} if the inventory phase failed. This is the background-thread target;
+    the HTTP layer drives it via _run_scan_bg + the /api/scan/progress poll endpoint."""
+    res = _scan_inventory()
+    if "error" in res:
+        return res
+    _scan_deep()
     return scan_cache
+
+
+def _run_scan_bg() -> None:
+    """Background-thread target: run both scan phases and keep scan_progress current.
+    Guarantees scan_progress['running'] is cleared even if a phase raises."""
+    try:
+        res = _scan_inventory()
+        if "error" in res:
+            with _cache_lock:
+                scan_progress.update({"running": False, "phase": "error", "error": res["error"]})
+            logger.error(f"Scan failed: {res['error']}")
+            return
+        _scan_deep()
+        with _cache_lock:
+            scan_progress.update({
+                "running": False,
+                "phase": "done",
+                "current_system": None,
+                "last_scan": scan_cache.get("last_scan"),
+            })
+        logger.info("Background scan finished")
+    except Exception as e:  # noqa: BLE001 — never leave running=True on a crash
+        logger.exception("Background scan crashed")
+        with _cache_lock:
+            scan_progress.update({"running": False, "phase": "error", "error": str(e)})
+
+
+# Hard ceiling for any single downloaded image. Cover art is normally well under a few MB;
+# this guards every image fetch (scrapers + user URL) against a hostile/huge upstream
+# response exhausting memory.
+_MAX_IMAGE_BYTES = 25 * 1024 * 1024
+
+
+def _read_capped(resp, max_bytes: int = _MAX_IMAGE_BYTES) -> bytes:
+    """Read at most max_bytes from a response. Raises ValueError if the cap is exceeded."""
+    data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"response exceeds {max_bytes} byte cap")
+    return data
+
+
+def _url_host_is_public(url: str) -> bool:
+    """Return True only if the URL's host resolves entirely to public IPs.
+
+    Blocks SSRF to loopback/private/link-local/metadata addresses (e.g. 127.0.0.1,
+    169.254.169.254, 192.168.x). Best-effort: there is a TOCTOU window between DNS
+    resolution and the actual connect, acceptable for a localhost-bound single-user tool.
+    """
+    try:
+        host = urllib.parse.urlparse(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    """Parse a CalVer string like '2026.04.23' into a comparable int tuple.
+
+    Lexicographic string comparison is wrong for versions ('2026.04.6' > '2026.04.23'),
+    so callers must compare these tuples instead. Non-numeric / missing parts → 0.
+    """
+    parts = []
+    for chunk in str(v).strip().lstrip("v").split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
 
 
 def format_size(size_bytes: float) -> str:
@@ -1362,7 +1641,15 @@ def set_config():
     """Update the share path and/or ScreenScraper credentials."""
     data = request.get_json(silent=True) or {}
     if "share_path" in data:
-        _config["share"] = data["share_path"]
+        share_path = data["share_path"]
+        # Must be a non-empty string. The share path is privileged (it's the root of every
+        # subsequent file operation), so reject obviously malformed values outright. The API
+        # is bound to localhost (see app.run), which is what prevents a remote caller from
+        # repointing it; existence is intentionally not required so the path can be configured
+        # while the Recalbox is offline.
+        if not isinstance(share_path, str) or not share_path.strip() or "\x00" in share_path:
+            return jsonify({"error": "Invalid share_path"}), 400
+        _config["share"] = share_path.strip()
     ss_changed = False
     for key in ("screenscraper_user", "screenscraper_pass", "screenscraper_devid", "screenscraper_devpass"):
         if key in data:
@@ -1380,11 +1667,52 @@ def set_config():
 
 @app.route("/api/scan", methods=["POST"])
 def trigger_scan():
-    """Trigger a full ROM scan."""
-    result = scan_roms()
-    if "error" in result:
-        return jsonify(result), 500
-    return jsonify({"ok": True, "stats": scan_cache["stats"], "last_scan": scan_cache["last_scan"]})
+    """Start a full ROM scan in the background and return immediately.
+
+    The scan runs in a daemon thread (Phase 1 inventory, then Phase 2 deep analysis); the
+    frontend polls /api/scan/progress to render systems as they appear. If a scan is already
+    running, this is a no-op that reports already_running."""
+    global _scan_thread
+    with _cache_lock:
+        if scan_progress.get("running"):
+            return jsonify({"ok": True, "already_running": True})
+        # Mark running synchronously so the very first progress poll already reflects it.
+        scan_progress.update({
+            "running": True,
+            "phase": "inventory",
+            "error": None,
+            "systems_total": 0,
+            "systems_done": 0,
+            "current_system": None,
+            "files_so_far": 0,
+            "started_at": datetime.now().isoformat(),
+        })
+    _scan_thread = threading.Thread(target=_run_scan_bg, name="rom-scan", daemon=True)
+    _scan_thread.start()
+    return jsonify({"ok": True, "started": True})
+
+
+@app.route("/api/scan/progress")
+def scan_progress_status():
+    """Live scan progress for the frontend poll loop.
+
+    Returns the progress block plus the lightweight per-system summaries gathered so far
+    (same shape as /api/systems, minus ROM lists) and the current partial stats, so the UI
+    can render systems and climbing counts before the scan finishes."""
+    with _cache_lock:
+        progress = dict(scan_progress)
+        systems = {
+            key: {k: v for k, v in sys_info.items() if k != "roms"}
+            for key, sys_info in scan_cache.get("systems", {}).items()
+        }
+        stats = scan_cache.get("stats") or None
+        last_scan = scan_cache.get("last_scan")
+    return jsonify({
+        "progress": progress,
+        "systems": systems,
+        "stats": stats,
+        "last_scan": last_scan,
+    })
 
 
 @app.route("/api/status")
@@ -1449,6 +1777,8 @@ def move_rom():
         return jsonify({"error": f"Invalid source system: {src_system}"}), 400
     if dst_system not in VALID_SYSTEMS:
         return jsonify({"error": f"Invalid destination system: {dst_system}"}), 400
+    if filename != os.path.basename(filename) or filename in ("", ".", ".."):
+        return jsonify({"error": "Invalid filename"}), 400
 
     src_path = os.path.join(_roms_root(), src_system, filename)
     dst_dir = os.path.join(_roms_root(), dst_system)
@@ -1465,10 +1795,9 @@ def move_rom():
             return jsonify({"error": f"Cannot create destination folder {dst_system}: {e}"}), 500
 
     if os.path.exists(dst_path):
-        src_hash = get_file_hash(src_path)
-        dst_hash = get_file_hash(dst_path)
-        if src_hash and dst_hash and src_hash == dst_hash:
-            # Identical content — trash the misplaced source, destination already correct
+        if files_identical(src_path, dst_path):
+            # Identical content (size + full-file compare) — trash the misplaced source,
+            # destination already correct.
             trash_dir = os.path.join(_roms_root(), "_trash", src_system)
             os.makedirs(trash_dir, exist_ok=True)
             shutil.move(src_path, os.path.join(trash_dir, filename))
@@ -1505,6 +1834,8 @@ def delete_rom():
 
     if system not in VALID_SYSTEMS:
         return jsonify({"error": f"Invalid system: {system}"}), 400
+    if filename != os.path.basename(filename) or filename in ("", ".", ".."):
+        return jsonify({"error": "Invalid filename"}), 400
 
     src_path = os.path.join(_roms_root(), system, filename)
     if not os.path.exists(src_path):
@@ -1541,6 +1872,9 @@ def bulk_move():
         if from_system not in VALID_SYSTEMS or to_system not in VALID_SYSTEMS:
             results.append({"file": filename, "status": "error", "error": "invalid system"})
             continue
+        if filename != os.path.basename(filename) or filename in ("", ".", ".."):
+            results.append({"file": filename, "status": "error", "error": "invalid filename"})
+            continue
         src = os.path.join(_roms_root(), from_system, filename)
         dst_dir = os.path.join(_roms_root(), to_system)
         dst = os.path.join(dst_dir, filename)
@@ -1553,9 +1887,7 @@ def bulk_move():
                 _remove_rom_from_cache(from_system, filename)
                 results.append({"file": filename, "status": "moved"})
             elif os.path.exists(src) and os.path.exists(dst):
-                src_hash = get_file_hash(src)
-                dst_hash = get_file_hash(dst)
-                if src_hash and dst_hash and src_hash == dst_hash:
+                if files_identical(src, dst):
                     trash_dir = os.path.join(_roms_root(), "_trash", from_system)
                     os.makedirs(trash_dir, exist_ok=True)
                     shutil.move(src, os.path.join(trash_dir, filename))
@@ -1961,7 +2293,7 @@ def version_check():
     release_url = data.get("html_url", "")
     body = data.get("body", "")
     notes_short = body[:500] + ("…" if len(body) > 500 else "")
-    has_update = bool(latest and latest > APP_VERSION)
+    has_update = bool(latest and _version_tuple(latest) > _version_tuple(APP_VERSION))
 
     result = {
         "current": APP_VERSION,
@@ -2081,6 +2413,13 @@ def write_gamelist_entry(system_dir, rom_filename, fields):
     fields may include: name, image, thumbnail, desc, rating.
     Returns {ok, created} — created=True if a new entry was added.
     """
+    # Serialize the read-parse-modify-write so two concurrent writers (e.g. overlapping
+    # scrapes) for the same system can't clobber each other's changes.
+    with _cache_lock:
+        return _write_gamelist_entry_locked(system_dir, rom_filename, fields)
+
+
+def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
     xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
     bak_path = xml_path + ".bak"
     tmp_path = xml_path + ".tmp"
@@ -2153,7 +2492,7 @@ def write_gamelist_entry(system_dir, rom_filename, fields):
 @app.route("/api/gamelist/update", methods=["POST"])
 def update_gamelist():
     """Merge or insert a <game> entry in gamelist.xml."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     system = data.get("system")
     filename = data.get("filename")
     if not system or not filename:
@@ -2169,7 +2508,7 @@ def repair_gamelist():
     Repair a corrupted gamelist.xml by stripping trailing junk after </gameList>.
     Creates a .bak backup before overwriting. Re-parses and refreshes scan cache.
     """
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     system = data.get("system")
     if not system:
         return jsonify({"error": "Missing system"}), 400
@@ -2347,7 +2686,7 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     # Download image
     try:
         with urllib.request.urlopen(img_url, timeout=15) as img_resp:
-            img_data = img_resp.read()
+            img_data = _read_capped(img_resp)
     except Exception as e:
         return {"ok": False, "error": "timeout", "detail": str(e)}
 
@@ -2391,7 +2730,7 @@ def fetch_libretro_cover(system_key, rom_filename, game_name=""):
     req = urllib.request.Request(img_url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            img_data = resp.read()
+            img_data = _read_capped(resp)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return {"ok": False, "error": "not_found"}
@@ -2744,7 +3083,7 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
         with urllib.request.urlopen(
             urllib.request.Request(img_url, headers=ua), timeout=15
         ) as resp:
-            img_data = resp.read()
+            img_data = _read_capped(resp)
             content_type = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -2860,7 +3199,7 @@ def _run_fallback_chain(scrape_type, system_key, rom_filename, game_name=""):
 @app.route("/api/covers/scrape", methods=["POST"])
 def scrape_cover():
     """Fetch cover art for one ROM using the fallback source chain."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     filename = data.get("filename")
     system = data.get("system")
     game_name = data.get("game_name", "")
@@ -2918,7 +3257,7 @@ def scrape_cover():
 @app.route("/api/descriptions/scrape", methods=["POST"])
 def scrape_description():
     """Fetch description for one ROM using the fallback source chain."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     filename = data.get("filename")
     system = data.get("system")
     game_name = data.get("game_name", "")
@@ -2973,7 +3312,7 @@ def scrape_description():
 @app.route("/api/covers/download-url", methods=["POST"])
 def download_cover_from_url():
     """Download a cover image from a user-provided URL and save to gamelist."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     system = data.get("system")
     filename = data.get("filename")
     image_url = data.get("image_url", "")
@@ -2987,6 +3326,10 @@ def download_cover_from_url():
     parsed = urllib.parse.urlparse(image_url)
     if parsed.scheme not in ("http", "https"):
         return jsonify({"ok": False, "error": "invalid_url", "detail": "Only http/https URLs are allowed"}), 400
+    # Security: block SSRF to loopback / private / link-local (metadata) addresses
+    if not _url_host_is_public(image_url):
+        return jsonify({"ok": False, "error": "blocked_url",
+                        "detail": "URL host is not a public address"}), 400
 
     # Download the image (10MB limit, 15s timeout)
     MAX_SIZE = 10 * 1024 * 1024
@@ -3066,11 +3409,287 @@ def download_cover_from_url():
     return jsonify({"ok": True, "cover_url": cover_url, "gamelist_updated": write_result.get("ok", False)})
 
 
+# ─── ROM Download Catalog ─────────────────────────────────────────────────────
+# Static, pre-built catalogs of downloadable ROMs per system, generated offline by
+# tools/build_catalog.py from the archive.org metadata API. The running server only reads
+# them — it never hits archive.org's API. One file per system: catalog/<system>.json.
+CATALOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog")
+
+# Lazy in-memory cache: system_key -> parsed catalog dict (or None if no/invalid file).
+_catalog_cache: dict[str, dict | None] = {}
+
+# Downloads may only come from archive.org (catalog URLs are produced by our build script).
+# urlopen transparently follows archive.org's redirect to a public ia*.us.archive.org node.
+def _is_archive_org_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "archive.org" or host.endswith(".archive.org")
+
+# Hard ceiling for a single ROM download. The catalogued systems are small (arcade .zip,
+# console .zip/.7z — KBs to tens of MB); this guards against a hostile/huge upstream response
+# filling the share. PSX/Redump (multi-GB) is intentionally not catalogued.
+_MAX_ROM_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+
+def _load_catalog(system_key: str) -> dict | None:
+    """Load and cache catalog/<system>.json. Returns None if absent or unparseable."""
+    if system_key in _catalog_cache:
+        return _catalog_cache[system_key]
+    path = os.path.join(CATALOG_DIR, f"{system_key}.json")
+    catalog = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                catalog = json.load(fh)
+        except (OSError, ValueError) as e:
+            logger.warning(f"Failed to load catalog {path}: {e}")
+            catalog = None
+    _catalog_cache[system_key] = catalog
+    return catalog
+
+
+def _owned_filenames(system_key: str) -> set[str]:
+    """Filenames already present in the current scan for a system (to flag 'owned')."""
+    sys_info = scan_cache.get("systems", {}).get(system_key)
+    if not sys_info:
+        return set()
+    return {r["name"] for r in sys_info.get("roms", [])}
+
+
+@app.route("/api/catalog/systems", methods=["GET"])
+def catalog_systems():
+    """List systems that have a shipped download catalog, with game counts."""
+    systems = []
+    try:
+        names = sorted(f for f in os.listdir(CATALOG_DIR) if f.endswith(".json"))
+    except OSError:
+        names = []
+    for fname in names:
+        system_key = fname[:-5]
+        cat = _load_catalog(system_key)
+        if not cat:
+            continue
+        systems.append({
+            "system": system_key,
+            "name": cat.get("name") or SYSTEM_DISPLAY_NAMES.get(system_key, system_key),
+            "count": cat.get("count", len(cat.get("games", []))),
+            "source": cat.get("source", "archive.org"),
+        })
+    return jsonify({"systems": systems})
+
+
+@app.route("/api/catalog/<system>", methods=["GET"])
+def catalog_list(system):
+    """Paginated, searchable catalog for one system. Flags games already owned.
+
+    Query params: q (substring filter), page (0-based, 100 per page).
+    """
+    if system not in VALID_SYSTEMS:
+        return jsonify({"error": f"Invalid system: {system}"}), 400
+    cat = _load_catalog(system)
+    if not cat:
+        return jsonify({"error": f"No catalog for system: {system}"}), 404
+
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        page = max(0, int(request.args.get("page", 0)))
+    except (TypeError, ValueError):
+        page = 0
+
+    games = cat.get("games", [])
+    if q:
+        games = [g for g in games
+                 if q in g.get("name", "").lower() or q in g.get("filename", "").lower()]
+
+    owned = _owned_filenames(system)
+    page_size = 100
+    total = len(games)
+    start = page * page_size
+    page_games = []
+    for g in games[start:start + page_size]:
+        page_games.append({**g, "owned": g.get("filename") in owned})
+
+    return jsonify({
+        "system": system,
+        "name": cat.get("name") or SYSTEM_DISPLAY_NAMES.get(system, system),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "games": page_games,
+    })
+
+
+@app.route("/api/catalog/download", methods=["POST"])
+def catalog_download():
+    """Download a catalogued ROM from archive.org into roms/<system>/ and write metadata.
+
+    Request body: {system, filename}. The URL is taken from the shipped catalog (never the
+    client), then streamed to disk with a size cap. After saving, a gamelist.xml entry is
+    written with the game name, plus best-effort cover + description via the scrape chain.
+    """
+    data = request.get_json(silent=True) or {}
+    system = data.get("system")
+    filename = data.get("filename")
+
+    if not system or not filename:
+        return jsonify({"error": "Missing system or filename"}), 400
+    if system not in VALID_SYSTEMS:
+        return jsonify({"error": f"Invalid system: {system}"}), 400
+    if filename != os.path.basename(filename) or filename in ("", ".", ".."):
+        return jsonify({"error": "Invalid filename"}), 400
+
+    cat = _load_catalog(system)
+    if not cat:
+        return jsonify({"error": f"No catalog for system: {system}"}), 404
+    game = next((g for g in cat.get("games", []) if g.get("filename") == filename), None)
+    if not game:
+        return jsonify({"error": "File not found in catalog"}), 404
+
+    url = game.get("url", "")
+    if urllib.parse.urlparse(url).scheme != "https" or not _is_archive_org_url(url):
+        return jsonify({"ok": False, "error": "invalid_url",
+                        "detail": "Catalog URL is not a valid archive.org https URL"}), 400
+    if not _url_host_is_public(url):
+        return jsonify({"ok": False, "error": "blocked_url",
+                        "detail": "URL host is not a public address"}), 400
+
+    dst_dir = os.path.join(_roms_root(), system)
+    dst_path = os.path.join(dst_dir, filename)
+    if os.path.exists(dst_path):
+        # Never overwrite — the canonical-named file is almost certainly the same game.
+        return jsonify({"ok": True, "action": "exists", "filename": filename,
+                        "message": "Already present in this system."})
+
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": "mkdir_failed", "detail": str(e)}), 500
+
+    # Stream to a temp file, then atomic-rename. Cap total bytes.
+    tmp_path = dst_path + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            written = 0
+            with open(tmp_path, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _MAX_ROM_BYTES:
+                        raise ValueError(f"download exceeds {_MAX_ROM_BYTES} byte cap")
+                    f.write(chunk)
+    except Exception as e:  # noqa: BLE001 — clean up partial file on any failure
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": "download_failed", "detail": str(e)})
+
+    # Extension sanity (warn-but-keep, matching the BIOS-upload policy).
+    ext = os.path.splitext(filename)[1].lower()
+    ext_warning = None
+    if SYSTEM_EXTENSIONS.get(system) and ext not in SYSTEM_EXTENSIONS[system]:
+        ext_warning = f"'{ext}' is not a typical {system} extension"
+
+    try:
+        os.replace(tmp_path, dst_path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": "write_error", "detail": str(e)}), 500
+
+    logger.info(f"[Catalog] Downloaded {filename} -> {dst_path} ({written} bytes)")
+
+    game_name = game.get("name") or _clean_rom_name(filename)
+    fields = {"name": game_name}
+
+    # Best-effort cover + description via the existing scrape fallback chain. Non-fatal.
+    cover_url = None
+    cover_source = None
+    try:
+        cover_res = _run_fallback_chain("cover", system, filename, game_name)
+        if cover_res.get("ok") and cover_res.get("img_filename"):
+            fields["image"] = f"./media/images/{cover_res['img_filename']}"
+            cover_url = cover_res.get("cover_url")
+            cover_source = cover_res.get("source")
+    except Exception:  # noqa: BLE001
+        logger.exception("Catalog cover scrape failed")
+
+    desc_text = None
+    desc_source = None
+    try:
+        desc_res = _run_fallback_chain("desc", system, filename, game_name)
+        if desc_res.get("ok") and desc_res.get("desc"):
+            fields["desc"] = desc_res["desc"]
+            desc_text = desc_res["desc"]
+            desc_source = desc_res.get("source")
+    except Exception:  # noqa: BLE001
+        logger.exception("Catalog description scrape failed")
+
+    write_result = write_gamelist_entry(system, filename, fields)
+
+    # Reflect the new ROM in the in-memory cache so the rest of the UI sees it without a rescan.
+    sys_info = scan_cache.get("systems", {}).get(system)
+    if sys_info is not None:
+        if not any(r.get("name") == filename for r in sys_info.get("roms", [])):
+            sys_info.setdefault("roms", []).append({
+                "name": filename,
+                "ext": ext,
+                "size": written,
+                "size_human": format_size(written),
+                "path": dst_path,
+                "system": system,
+                "game_name": game_name,
+                "has_metadata": True,
+                "has_cover": bool(cover_url),
+                "cover_url": cover_url,
+                "has_description": bool(desc_text),
+                "issue": None,
+            })
+            sys_info["total_roms"] = len(sys_info["roms"])
+            sys_info["ok_count"] = sys_info.get("ok_count", 0) + 1
+            if cover_url:
+                sys_info["cover_count"] = sys_info.get("cover_count", 0) + 1
+            if desc_text:
+                sys_info["description_count"] = sys_info.get("description_count", 0) + 1
+        if scan_cache.get("stats"):
+            scan_cache["stats"]["total_files"] = sum(
+                s.get("total_roms", 0) for s in scan_cache.get("systems", {}).values()
+            )
+
+    return jsonify({
+        "ok": True,
+        "filename": filename,
+        "system": system,
+        "name": game_name,
+        "size_human": format_size(written),
+        "cover": bool(cover_url),
+        "cover_url": cover_url,
+        "cover_source": cover_source,
+        "description": bool(desc_text),
+        "description_source": desc_source,
+        "gamelist_updated": write_result.get("ok", False),
+        "ext_warning": ext_warning,
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5123))
+    # debug is OFF by default: debug=True enables the Werkzeug interactive debugger, which
+    # is a remote-code-execution vector on any unhandled exception. Opt in with FLASK_DEBUG=1.
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
     # FLASK_RELOADER=false disables Werkzeug's reloader (used by test fixtures to
     # prevent orphan child processes that keep the port alive after the parent is killed)
-    use_reloader = os.environ.get("FLASK_RELOADER", "true").lower() != "false"
+    use_reloader = debug and os.environ.get("FLASK_RELOADER", "true").lower() != "false"
+    # Bind localhost by default; set RECALBOX_MANAGER_HOST=0.0.0.0 to deliberately expose
+    # the (unauthenticated) API to the whole LAN.
+    host = os.environ.get("RECALBOX_MANAGER_HOST", "127.0.0.1")
     logger.info(f"Starting Recalbox ROM Manager on http://localhost:{port}")
     logger.info(f"Recalbox share path: {_config['share']}")
     logger.info(f"ROMs root: {_roms_root()}")
@@ -3080,4 +3699,6 @@ if __name__ == "__main__":
             "Wrong-content issues inside .7z files will be silently skipped. "
             "Run: pip install py7zr"
         )
-    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=use_reloader)
+    # threaded=True so the /api/scan/progress poll endpoint is served while the background
+    # scan thread runs (Werkzeug defaults to threaded, but make it explicit).
+    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader, threaded=True)

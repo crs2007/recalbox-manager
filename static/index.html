@@ -299,6 +299,11 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
   border-top-color: var(--accent); border-radius: 50%;
   animation: spin 0.8s linear infinite; margin: 0 auto 16px;
 }
+.scan-progress .spinner {
+  width: 28px; height: 28px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
 .empty-state .emoji { font-size: 2.5rem; margin-bottom: 12px; }
@@ -447,6 +452,24 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
 .browse-card-overlay .overlay-meta {
   font-size: 0.7rem; color: var(--text-muted); margin-top: auto;
 }
+.catalog-systembar { display: flex; gap: 8px; flex-wrap: wrap; }
+.catalog-pager { display: flex; gap: 8px; align-items: center; }
+.catalog-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+.catalog-card {
+  border-radius: var(--radius); overflow: hidden;
+  background: var(--bg-card); border: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.catalog-card:hover { border-color: var(--accent); box-shadow: 0 6px 18px rgba(56, 189, 248, 0.12); }
+.catalog-card .browse-card-img { width: 100%; height: 190px; }
+.catalog-card-meta {
+  padding: 0 10px 6px; font-size: 0.72rem; color: var(--text-muted);
+}
+.catalog-card-action { padding: 0 10px 10px; margin-top: auto; }
 .browse-scroll-btn {
   position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
   width: 36px; height: 36px; border-radius: 50%;
@@ -581,6 +604,7 @@ const state = {
   searchQuery: '',
   searchResults: [],
   scanning: false,
+  scanProgress: null,   // {running, phase, systems_total, systems_done, current_system, files_so_far}
   loading: true,
   modal: null,
   toasts: [],
@@ -626,6 +650,17 @@ const state = {
   updateAvailable: null,
   // Session-local submitted reports (mirrors /api/kb/reports, reset on reload)
   userReports: [],
+  // Download ROMs catalog
+  catalogSystemsList: null,   // [{system,name,count}] or null until first load
+  catalogSystem: null,        // selected system key
+  catalog: [],                // current page of games
+  catalogTotal: 0,
+  catalogPage: 0,
+  catalogQuery: '',
+  catalogLoading: false,
+  catalogDownloading: {},     // "system/filename" -> true
+  catalogQueue: [],
+  catalogBulk: false,
 };
 
 // ─── API Helpers ─────────────────────────────────────────────────────────────
@@ -666,6 +701,9 @@ async function init() {
   if (st.stats && st.stats.total_files !== undefined) {
     state.stats = st.stats;
     state.lastScan = st.last_scan;
+    // A previous scan is cached server-side — load the systems grid so it isn't empty.
+    const sys = await api('/systems');
+    if (!sys.error) state.systems = sys;
     const [covers, descs] = await Promise.all([api('/covers/missing'), api('/descriptions/missing')]);
     if (Array.isArray(covers)) state.missingCovers = covers;
     if (Array.isArray(descs)) state.missingDescriptions = descs;
@@ -843,21 +881,64 @@ async function updateConfig(sharePath) {
   render();
 }
 
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
 async function startScan() {
-  state.scanning = true; render();
-  toast('Scanning ROMs... this may take a while for thousands of files', 'info');
-  const r = await api('/scan', { method: 'POST' });
-  state.scanning = false;
-  if (r.error) {
-    const cfg = await api('/config');
-    if (!cfg.error) state.config = cfg;
-    toast(r.error, 'error'); render(); return;
-  }
-  state.stats = r.stats; state.lastScan = r.last_scan;
+  state.scanning = true;
+  state.scanProgress = { running: true, phase: 'inventory', systems_total: 0, systems_done: 0, current_system: null, files_so_far: 0 };
   // Clear browse cache so fresh data is loaded
   Object.keys(browseRomsCache).forEach(k => delete browseRomsCache[k]);
+  render();
+  toast('Scanning ROMs...', 'info');
+
+  const start = await api('/scan', { method: 'POST' });
+  if (start && start.error) {
+    state.scanning = false; state.scanProgress = null;
+    const cfg = await api('/config');
+    if (!cfg.error) state.config = cfg;
+    toast(start.error, 'error'); render(); return;
+  }
+
+  // Poll progress until the background scan finishes. Systems and climbing counts stream in
+  // so the user can start working before the deep analysis completes. Skip polling if the
+  // backend completed the scan synchronously (older builds return stats directly), and stop
+  // polling if /scan/progress is unavailable (e.g. server not restarted after an update) —
+  // either way we fall through to the consolidated loads below.
+  if (!(start && start.stats)) {
+    let pollErrors = 0;
+    while (true) {
+      const p = await api('/scan/progress');
+      if (p && !p.error) {
+        pollErrors = 0;
+        state.scanProgress = p.progress || null;
+        if (p.systems) state.systems = p.systems;
+        if (p.stats) state.stats = p.stats;
+        if (p.last_scan) state.lastScan = p.last_scan;
+        render();
+        const phase = p.progress && p.progress.phase;
+        if (phase === 'error') {
+          state.scanning = false; state.scanProgress = null;
+          const cfg = await api('/config');
+          if (!cfg.error) state.config = cfg;
+          toast((p.progress && p.progress.error) || 'Scan failed', 'error'); render(); return;
+        }
+        if (phase === 'done') break;
+      } else if (++pollErrors >= 5) {
+        // Progress endpoint unreachable — stop polling and load results directly.
+        break;
+      }
+      await sleep(700);
+    }
+  }
+
+  state.scanning = false;
+
+  // Final consolidated loads. Always refetch /systems and /status so the grid and stats are
+  // populated regardless of how the scan completed (streaming poll, sync, or fallback).
   const sys = await api('/systems');
   if (!sys.error) state.systems = sys;
+  const st = await api('/status');
+  if (st && st.stats) { state.stats = st.stats; state.lastScan = st.last_scan; }
   const iss = await api('/issues');
   if (!iss.error) state.issues = iss;
   const dups = await api('/duplicates');
@@ -873,7 +954,9 @@ async function startScan() {
   const cfg = await api('/config');
   if (!cfg.error) state.config = cfg;
   loadKB();
-  toast(`Scan complete! ${r.stats.total_files} files found`, 'success');
+  const total = (state.stats && state.stats.total_files) || 0;
+  toast(`Scan complete! ${total} files found`, 'success');
+  state.scanProgress = null;
   render();
 }
 
@@ -1223,6 +1306,104 @@ function startBulkScrapeDescs(roms) {
   processScrapeDescQueue();
 }
 
+// ─── Download ROMs Catalog ─────────────────────────────────────────────────────
+async function loadCatalogSystems() {
+  state.catalogLoading = true;
+  const r = await api('/catalog/systems');
+  state.catalogLoading = false;
+  state.catalogSystemsList = (r && Array.isArray(r.systems)) ? r.systems : [];
+  if (state.catalogSystemsList.length && !state.catalogSystem) {
+    state.catalogSystem = state.catalogSystemsList[0].system;
+    await loadCatalog();
+    return;
+  }
+  render();
+}
+
+async function loadCatalog() {
+  if (!state.catalogSystem) { render(); return; }
+  state.catalogLoading = true;
+  const qs = `?q=${encodeURIComponent(state.catalogQuery || '')}&page=${state.catalogPage}`;
+  const r = await api('/catalog/' + encodeURIComponent(state.catalogSystem) + qs);
+  state.catalogLoading = false;
+  if (r && Array.isArray(r.games)) {
+    state.catalog = r.games;
+    state.catalogTotal = r.total || 0;
+  } else {
+    state.catalog = [];
+    state.catalogTotal = 0;
+    if (r && r.error) toast('Catalog error: ' + r.error, 'error');
+  }
+  render();
+}
+
+function selectCatalogSystem(sys) {
+  if (state.catalogSystem === sys) return;
+  state.catalogSystem = sys;
+  state.catalogPage = 0;
+  state.catalogQuery = '';
+  loadCatalog();
+}
+
+function setCatalogPage(p) {
+  const pages = Math.max(1, Math.ceil(state.catalogTotal / 100));
+  state.catalogPage = Math.min(Math.max(0, p), pages - 1);
+  loadCatalog();
+}
+
+async function downloadRom(system, filename) {
+  const key = system + '/' + filename;
+  if (state.catalogDownloading[key]) return;
+  state.catalogDownloading[key] = true;
+  render();
+  const r = await api('/catalog/download', { method: 'POST', body: { system, filename } });
+  delete state.catalogDownloading[key];
+  if (r && r.ok) {
+    const g = state.catalog.find(x => x.filename === filename);
+    if (g) g.owned = true;
+    if (r.action === 'exists') {
+      toast(filename + ' is already present', 'info');
+    } else {
+      const extras = [];
+      if (r.cover) extras.push('cover' + (r.cover_source ? ' via ' + r.cover_source : ''));
+      if (r.description) extras.push('description');
+      toast('Downloaded ' + filename + (extras.length ? ' (+ ' + extras.join(', ') + ')' : ''), 'success');
+      if (r.ext_warning) toast(r.ext_warning, 'warning');
+    }
+  } else {
+    const msgs = {
+      download_failed: 'Download failed — archive.org may be unreachable',
+      invalid_url: 'Catalog entry has an invalid URL',
+      blocked_url: 'Download URL host is not allowed',
+      write_error: 'Could not write the file to the share',
+      mkdir_failed: 'Could not create the system folder',
+    };
+    toast(msgs[r && r.error] || ('Download failed: ' + ((r && (r.error || r.detail)) || 'unknown')), 'error');
+  }
+  render();
+}
+
+async function processCatalogQueue() {
+  if (!state.catalogQueue.length) {
+    state.catalogBulk = false;
+    toast('Catalog downloads complete', 'success');
+    render();
+    return;
+  }
+  state.catalogBulk = true;
+  const { system, filename } = state.catalogQueue.shift();
+  await downloadRom(system, filename);
+  setTimeout(processCatalogQueue, 1000); // gentle gap — downloads are heavier than scrapes
+}
+
+function startCatalogDownload(games) {
+  if (state.catalogBulk) { toast('A bulk download is already in progress', 'info'); return; }
+  const pending = games.filter(g => !g.owned);
+  if (!pending.length) { toast('Nothing to download on this page', 'info'); return; }
+  state.catalogQueue = pending.map(g => ({ system: state.catalogSystem, filename: g.filename }));
+  processCatalogQueue();
+}
+
 async function saveSsCredentials() {
   const user = document.getElementById('ssUser')?.value || '';
   const pass = document.getElementById('ssPass')?.value || '';
@@ -1261,10 +1442,10 @@ function render() {
   app.innerHTML = `
     ${renderHeader()}
     ${renderConfig()}
-    ${state.scanning ? renderLoading('Scanning your ROM collection...') : ''}
-    ${!state.scanning && state.stats ? renderStats() : ''}
-    ${!state.scanning && state.stats ? renderTabs() : ''}
-    ${!state.scanning && state.stats ? renderContent() : ''}
+    ${state.scanning ? renderScanProgress() : ''}
+    ${state.stats ? renderStats() : ''}
+    ${state.stats ? renderTabs() : ''}
+    ${state.stats ? renderContent() : ''}
     ${!state.stats && !state.scanning && !state.loading ? renderWelcome() : ''}
     ${state.loading ? renderLoading('Connecting to server...') : ''}
     ${state.editModal ? renderEditModal() : ''}
@@ -1373,6 +1554,7 @@ function renderTabs() {
     { id: 'kb', label: 'Knowledge Base' },
     { id: 'covers', label: 'Missing Covers', badge: state.missingCovers.length },
     { id: 'descriptions', label: 'Missing Descriptions', badge: state.missingDescriptions.length },
+    { id: 'catalog', label: '⬇ Download ROMs' },
     { id: 'search', label: 'Search' },
   ];
   return `<div class="tabs">
@@ -1395,6 +1577,7 @@ function renderContent() {
     case 'kb': return renderKB();
     case 'covers': return renderMissingCovers();
     case 'descriptions': return renderMissingDescriptions();
+    case 'catalog': return renderCatalog();
     case 'search': return renderSearch();
     default: return '';
   }
@@ -2126,6 +2309,71 @@ function renderMissingDescriptions() {
   `;
 }
 
+function renderCatalogCard(g) {
+  const key = (state.catalogSystem || '') + '/' + g.filename;
+  const dl = !!state.catalogDownloading[key];
+  const cover = g.cover_url
+    ? `<img src="${escHtml(g.cover_url)}" loading="lazy" alt="${escHtml(g.name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="browse-card-placeholder" style="display:none">🎮</div>`
+    : `<div class="browse-card-placeholder">🎮</div>`;
+  const action = g.owned
+    ? `<span class="issue-badge ok" style="width:100%;text-align:center">✓ Owned</span>`
+    : `<button class="btn btn-sm btn-primary" style="width:100%" onclick="downloadRom('${escJs(state.catalogSystem)}','${escJs(g.filename)}')" ${dl ? 'disabled' : ''}>${dl ? '⟳ Downloading…' : '⬇ Download'}</button>`;
+  return `
+    <div class="catalog-card">
+      <div class="browse-card-img">${cover}</div>
+      <div class="browse-card-name" title="${escHtml(g.filename)}">${escHtml(g.name)}</div>
+      <div class="catalog-card-meta">${escHtml(g.size_human || '')}</div>
+      <div class="catalog-card-action">${action}</div>
+    </div>`;
+}
+
+function renderCatalog() {
+  if (state.catalogSystemsList === null) {
+    if (!state.catalogLoading) loadCatalogSystems();
+    return renderLoading('Loading catalog…');
+  }
+  if (!state.catalogSystemsList.length) {
+    return '<div class="empty-state"><div class="emoji">📦</div><p>No download catalogs are installed. Run <code>python tools/build_catalog.py</code> to generate them.</p></div>';
+  }
+
+  const sysButtons = state.catalogSystemsList.map(s =>
+    `<button class="btn btn-sm ${state.catalogSystem === s.system ? 'btn-primary' : ''}" onclick="selectCatalogSystem('${escJs(s.system)}')">${escHtml(s.name)} <span style="opacity:0.6">(${s.count})</span></button>`
+  ).join('');
+
+  const pages = Math.max(1, Math.ceil(state.catalogTotal / 100));
+  const pendingOnPage = state.catalog.filter(g => !g.owned);
+  const bulkBtn = pendingOnPage.length
+    ? `<button class="btn btn-sm btn-primary" onclick="startCatalogDownload(state.catalog)" ${state.catalogBulk ? 'disabled' : ''}>${state.catalogBulk ? `⟳ Downloading (${state.catalogQueue.length} left)…` : `⬇ Download all on this page (${pendingOnPage.length})`}</button>`
+    : '';
+
+  const pager = pages > 1 ? `
+    <div class="catalog-pager">
+      <button class="btn btn-sm" onclick="setCatalogPage(${state.catalogPage - 1})" ${state.catalogPage <= 0 ? 'disabled' : ''}>← Prev</button>
+      <span style="color:var(--text-dim);font-size:0.82rem">Page ${state.catalogPage + 1} / ${pages} · ${state.catalogTotal} games</span>
+      <button class="btn btn-sm" onclick="setCatalogPage(${state.catalogPage + 1})" ${state.catalogPage >= pages - 1 ? 'disabled' : ''}>Next →</button>
+    </div>` : `<span style="color:var(--text-dim);font-size:0.82rem">${state.catalogTotal} games</span>`;
+
+  const grid = state.catalogLoading
+    ? renderLoading('Loading games…')
+    : (state.catalog.length
+        ? `<div class="catalog-grid">${state.catalog.map(renderCatalogCard).join('')}</div>`
+        : '<div class="empty-state"><div class="emoji">🔍</div><p>No games match your search.</p></div>');
+
+  return `
+    <div style="margin-bottom:6px;color:var(--text-dim);font-size:0.82rem">
+      Download new ROMs straight onto your share. Source: <strong>archive.org</strong>. Covers from Libretro Thumbnails. Files land in <code>roms/&lt;system&gt;/</code> with a gamelist.xml entry.
+    </div>
+    <div class="catalog-systembar">${sysButtons}</div>
+    <div style="display:flex;gap:10px;align-items:center;margin:12px 0;flex-wrap:wrap">
+      <input type="text" id="catalogSearch" placeholder="Search ${escHtml(state.catalogSystem || '')}…" value="${escHtml(state.catalogQuery)}"
+        style="flex:1;min-width:220px;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:inherit;font-size:0.9rem">
+      ${bulkBtn}
+      ${pager}
+    </div>
+    ${grid}
+  `;
+}
+
 function renderSearch() {
   return `
     <div class="search-bar">
@@ -2542,6 +2790,34 @@ function renderLoading(msg) {
   return `<div class="loading"><div class="spinner"></div><p>${msg}</p></div>`;
 }
 
+function renderScanProgress() {
+  const p = state.scanProgress || {};
+  const total = p.systems_total || 0;
+  const done = p.systems_done || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const phaseLabel = p.phase === 'deep'
+    ? 'Analyzing contents (duplicates &amp; diagnostics)'
+    : 'Listing systems';
+  const current = p.current_system ? ` — ${escHtml(p.current_system)}` : '';
+  const files = p.files_so_far ? ` · ${p.files_so_far} files` : '';
+  return `
+    <div class="scan-progress" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:16px 0;display:flex;align-items:center;gap:16px">
+      <div class="spinner" style="flex-shrink:0"></div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px">
+          <span><strong>${phaseLabel}</strong>${current}</span>
+          <span style="color:var(--text-dim)">${done}/${total}${files}</span>
+        </div>
+        <div style="height:8px;background:var(--bg-input);border-radius:4px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--accent),var(--purple));transition:width .3s"></div>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-dim);margin-top:6px">
+          Systems appear below as they're scanned — you can start working right away.
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderModal() {
   const m = state.modal;
   if (!m) return '';
@@ -2606,6 +2882,16 @@ function bindEvents() {
     let debounce;
     rf.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { state.romFilter = rf.value; state.romPage = 0; render(); }, 200); };
   }
+  const cs = document.getElementById('catalogSearch');
+  if (cs) {
+    let debounce;
+    cs.oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { state.catalogQuery = cs.value; state.catalogPage = 0; loadCatalog(); }, 300); };
+    // Keep focus on the search box across result re-renders (but don't steal it during bulk downloads)
+    if (state.activeTab === 'catalog' && !state.catalogBulk && state.catalogQuery) {
+      cs.focus();
+      const v = cs.value; cs.value = ''; cs.value = v; // caret to end
+    }
+  }
   const het = document.getElementById('hideEmptyToggle');
   if (het) {
     het.onchange = () => { state.hideEmptySystems = het.checked; render(); };
@@ -2636,7 +2922,7 @@ function bindEvents() {
 
 // ─── Utils ───────────────────────────────────────────────────────────────────
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function escJs(s) { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+function escJs(s) { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
 
 // ─── Footer ──────────────────────────────────────────────────────────────────
 function renderFooter() {

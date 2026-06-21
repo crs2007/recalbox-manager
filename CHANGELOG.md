@@ -2,6 +2,31 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.06.3 — 2026-06-21
+### Added
+- **Download ROMs catalog** — New "Download ROMs" tab to acquire new games per system straight onto the share. Ships pre-built per-system catalogs (`catalog/<system>.json`) for the top 5 systems (MAME, NES, SNES, Genesis/Megadrive, GBA), generated offline from the archive.org metadata API by `tools/build_catalog.py`. Each game shows a cover (deterministic Libretro thumbnail URL, no pre-download) and lets you download the ROM into `roms/<system>/`, automatically writing a `gamelist.xml` entry with name, and best-effort cover + description (via the existing scrape fallback chain). New endpoints: `GET /api/catalog/systems`, `GET /api/catalog/<system>`, `POST /api/catalog/download`. Already-owned games are flagged against the current scan. Per-item and "download all on this page" (sequential queue) actions with progress.
+
+## v2026.06.2 — 2026-06-21
+### Added / Performance
+- **Progressive, non-blocking scan** — `POST /api/scan` now starts the scan in a background thread and returns immediately; the UI polls the new `GET /api/scan/progress` endpoint and renders systems one-by-one with a live progress bar, so you can start working before the scan finishes. The scan runs in two phases: a fast metadata-only **inventory** (names/sizes/placement/gamelist — no per-file content reads), then a background **deep analysis** (duplicate detection + content diagnostics) that fills in counts as it completes.
+- **Faster duplicate detection** — Files are now grouped by size first and only candidates that share a size with another file are hashed. Files with a unique size cannot be duplicates, so the large majority of the per-ROM 64 KB hash reads over SMB are skipped.
+- **Fewer SMB round-trips** — `parse_gamelist()` now batches cover-image existence checks (one `os.scandir` per media folder instead of one `os.path.exists` per game), and `run_rom_diagnostics()` reuses the file list already gathered during inventory instead of re-enumerating each system folder.
+
+## v2026.06.0 — 2026-06-20
+### Fixed
+- **Data-loss guard on move** — Moving a ROM into a folder that already contains a same-named file no longer trashes the source based on a 64 KB partial hash. `files_identical()` now requires equal size **and** a full-file byte comparison before the misplaced source is removed (affects `/api/move` and `/api/bulk-move`). Two different ROMs that shared a 64 KB header could previously cause the source to be silently trashed.
+- **Path traversal** — `/api/move`, `/api/delete`, and `/api/bulk-move` now reject any `filename` that isn't a bare basename (blocks `..` escapes and absolute paths), matching the guard already used by the auto-fix endpoints.
+- **Version check** — "Update available" now compares CalVer numerically (`2026.06.0` parsed to an int tuple) instead of lexicographically, which wrongly ranked `2026.04.6` above `2026.04.23`.
+- **m3u false positive** — Comment lines with leading whitespace (`  # ...`) are no longer mistaken for disc references in the `broken_m3u` diagnostic.
+### Changed / Security
+- **Localhost by default** — The server now binds `127.0.0.1` and runs with `debug=False` unless `RECALBOX_MANAGER_HOST=0.0.0.0` / `FLASK_DEBUG=1` are set. This removes the Werkzeug interactive-debugger RCE surface and stops exposing the unauthenticated API to the whole LAN by default.
+- **CORS scoped to localhost** — Replaced the wildcard CORS policy with a localhost-only origin allowlist, closing cross-site (CSRF-style) access to the mutating endpoints.
+- **SSRF guard** — `/api/covers/download-url` now rejects URLs whose host resolves to loopback/private/link-local addresses (e.g. cloud metadata, `127.0.0.1`).
+- **Download size caps** — All image fetches (ScreenScraper, Libretro, Sega Fandom) now cap the response at 25 MB instead of reading unbounded into memory.
+- **Concurrency** — Added a lock around the scan-cache swap and the gamelist.xml read-modify-write so concurrent scans/scrapes can't corrupt state or lose updates.
+- **share_path validation** — `/api/config` now rejects empty / non-string / null-byte share paths.
+- Narrowed an over-broad `except` in archive inspection; standardized JSON request parsing on `get_json(silent=True)`; hardened the frontend `escJs` helper to escape newlines.
+
 ## v2026.04.23 — 2026-04-27
 ### Changed
 - **BIOS Status UX** — Added a summary banner showing counts of required/optional/wrong-version BIOS files with a plain-language explanation of what to do. Rows now sorted by priority (required missing first, ok rows dimmed at bottom). Each missing/wrong-version row gets a "🔍 Search" button that opens a DuckDuckGo search for the filename. Upload button relabelled "⚡ Select & Upload" to clarify it opens a local file picker.

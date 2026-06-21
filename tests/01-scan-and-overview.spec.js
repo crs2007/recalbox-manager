@@ -28,6 +28,21 @@ test.describe('Scan and overview', () => {
     expect(count).toBeGreaterThanOrEqual(4);
   });
 
+  test('scan/progress endpoint reports done with streamed systems and stats', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /Scan ROMs/i }).click();
+    await expect(page.locator('.spinner')).not.toBeAttached({ timeout: 30_000 });
+    const res = await page.request.get('/api/scan/progress');
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.progress.phase).toBe('done');
+    expect(body.progress.running).toBe(false);
+    // Systems are streamed into the cache during the inventory phase.
+    expect(Object.keys(body.systems).length).toBeGreaterThanOrEqual(4);
+    // Deep-phase results (duplicates) are populated by the time phase === 'done'.
+    expect(body.stats.total_duplicates).toBeGreaterThan(0);
+  });
+
   test('Issues tab badge shows non-zero count for misplaced ROM', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: /Scan ROMs/i }).click();

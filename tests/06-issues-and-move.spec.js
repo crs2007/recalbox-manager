@@ -18,8 +18,8 @@ test.describe('Issues tab — misplaced ROM detection and move', () => {
   test('misplaced ROM shows a move option (Choose... button — 2 suggested systems)', async ({ page }) => {
     const issueRow = page.locator('.issue-row', { hasText: 'SonicWrong.md' });
     await expect(issueRow).toBeVisible({ timeout: 5_000 });
-    // .md maps to megadrive AND genesis (2 systems), so button is "Choose..." not a direct move
-    await expect(issueRow.getByRole('button', { name: 'Choose...' })).toBeVisible();
+    // .md maps to multiple systems (megadrive/genesis/sega32x), so button is "Choose system…" not a direct move
+    await expect(issueRow.getByRole('button', { name: 'Choose system' })).toBeVisible();
   });
 
   // Mutating test — runs last in this file. Opens modal and moves SonicWrong.md to megadrive.
@@ -28,7 +28,7 @@ test.describe('Issues tab — misplaced ROM detection and move', () => {
     await expect(issueRow).toBeVisible({ timeout: 5_000 });
 
     // Open move modal
-    await issueRow.getByRole('button', { name: 'Choose...' }).click();
+    await issueRow.getByRole('button', { name: 'Choose system' }).click();
     await expect(page.locator('.modal')).toBeVisible({ timeout: 5_000 });
 
     // Select megadrive (first suggested option in the dropdown)
