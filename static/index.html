@@ -925,7 +925,13 @@ async function startScan() {
           state.scanning = false; state.scanProgress = null;
           const cfg = await api('/config');
           if (!cfg.error) state.config = cfg;
-          toast((p.progress && p.progress.error) || 'Scan failed', 'error'); render(); return;
+          // A failed scan leaves the previous inventory in place on the server — reload it.
+          const [sys0, st0, iss0] = await Promise.all([api('/systems'), api('/status'), api('/issues')]);
+          if (!sys0.error) state.systems = sys0;
+          if (st0 && st0.stats) { state.stats = st0.stats; state.lastScan = st0.last_scan; }
+          if (!iss0.error) state.issues = iss0;
+          const stale = p.progress && p.progress.stale;
+          toast(((p.progress && p.progress.error) || 'Scan failed') + (stale ? ' — showing the previous scan results' : ''), 'error'); render(); return;
         }
         if (phase === 'done') break;
       } else if (++pollErrors >= 5) {
@@ -1737,7 +1743,7 @@ function renderSystemDetail() {
 }
 
 function renderIssues() {
-  const filters = ['all', 'misplaced', 'duplicate', 'unknown_system', 'permission_error', 'corrupted_gamelist'];
+  const filters = ['all', 'misplaced', 'duplicate', 'unknown_system', 'permission_error', 'scan_error', 'corrupted_gamelist'];
   let issues = state.issues;
   if (state.issueFilter !== 'all') issues = issues.filter(i => i.type === state.issueFilter);
 
@@ -1782,6 +1788,14 @@ function renderIssues() {
           </div>
           <div class="issue-actions">
             ${i.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="trashDuplicate('${escJs(i.copies[0].system)}','${escJs(i.copies[0].file)}','${escJs(c.system)}','${escJs(c.file)}')" title="Keep first copy, trash this one (verified identical)">🗑 ${escHtml(c.system)}</button>`).join('')}
+          </div>
+        </div>`;
+      if (i.type === 'scan_error') return `
+        <div class="issue-row">
+          <div class="issue-icon">⚠️</div>
+          <div class="issue-details">
+            <div class="issue-file">Scan error — <strong>${escHtml(i.system)}</strong></div>
+            <div class="issue-desc">Could not read this folder (${escHtml(i.error || 'I/O error')}). The rest of the scan continued; rescan once the share is reachable.</div>
           </div>
         </div>`;
       if (i.type === 'permission_error') return `

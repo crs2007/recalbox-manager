@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.9 — 2026-11-09
+### Fixed
+- **A scan wiped the previous results first, so an SMB drop left a partial inventory** (#9) — Phase 1 now builds the new inventory in a pending namespace (streamed to the UI through `/api/scan/progress`) and swaps it into `scan_cache` only when complete. A failed scan keeps the previous good cache and reports `phase:"error"` with `stale:true`; the UI reloads and keeps showing the old results. Any `OSError` while reading one folder (not just `PermissionError`) is now recorded as a `scan_error` issue and the scan continues with the next system.
+
 ## v2026.07.8 — 2026-11-09
 ### Fixed
 - **Read endpoints raced the background scan** (#8) — `/api/status`, `/api/systems`, `/api/systems/<name>`, `/api/issues`, `/api/duplicates`, `/api/search`, `/api/diagnostics`, the diagnostics snapshot, missing covers/descriptions, bug reports and the catalog "owned" check now read `scan_cache` under `_cache_lock`, so they can no longer hit `dictionary changed size during iteration` or serve half-written data. The deep scan runs diagnostics on private copies of the ROM dicts and swaps a fresh system entry in under the lock (copy-on-write) instead of mutating committed entries. `_remove_diag_from_cache` now takes the lock too.

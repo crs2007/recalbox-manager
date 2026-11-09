@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.8"
+APP_VERSION = "2026.07.9"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -665,6 +665,10 @@ scan_progress = {
     "last_scan": None,
 }
 _scan_thread: threading.Thread | None = None
+# Phase 1 builds the new inventory here and swaps it into scan_cache only when complete, so a
+# failed/aborted scan (SMB drop, Pi reboot) never destroys the previous good inventory.
+# Mutated only under _cache_lock; {} when no inventory is in progress.
+_pending_scan: dict = {}
 
 # ─── Session-Local User Reports ───────────────────────────────────────────────
 # Ephemeral — never written to disk, lost on restart. Max 20 entries.
@@ -1296,15 +1300,16 @@ def _save_cover_image(system_key, rom_filename, img_data, ext, source, sanitize_
     }
 
 
-def _compute_stats() -> dict:
+def _compute_stats(source: dict | None = None) -> dict:
     """Recompute the stats block from the current scan_cache. Call under _cache_lock.
 
     Derives every total from the committed systems / issues / duplicates, so it produces a
     correct *partial* stats block after Phase 1 (duplicates + diagnostics still 0) and the
     full block after Phase 2 — no separate accumulators to keep in sync."""
-    systems = scan_cache.get("systems", {})
-    issues = scan_cache.get("issues", [])
-    duplicates = scan_cache.get("duplicates", [])
+    src = scan_cache if source is None else source
+    systems = src.get("systems", {})
+    issues = src.get("issues", [])
+    duplicates = src.get("duplicates", [])
     total_size_bytes = sum(
         r.get("size", 0) for s in systems.values() for r in s.get("roms", [])
     )
@@ -1351,14 +1356,17 @@ def _scan_inventory() -> dict:
     except PermissionError:
         return {"error": f"Permission denied accessing {_roms_root()}"}
 
-    # Reset accumulators so stale results from a previous scan don't linger while this one runs.
+    # Build into a pending namespace; scan_cache keeps the previous good inventory until the
+    # new one is complete (swapped in at the end of this function).
+    new_systems: dict = {}
+    new_gamelists: dict = {}
     with _cache_lock:
-        scan_cache["systems"] = {}
-        scan_cache["issues"] = []
-        scan_cache["duplicates"] = []
-        scan_cache["gamelists"] = {}
+        _pending_scan.clear()
+        _pending_scan.update({"systems": new_systems, "issues": [], "duplicates": []})
         scan_progress.update({
             "phase": "inventory",
+            "stale": False,
+            "error": None,
             "systems_total": len(system_dirs),
             "systems_done": 0,
             "current_system": None,
@@ -1458,10 +1466,16 @@ def _scan_inventory() -> dict:
 
                     roms.append(rom_info)
 
-        except PermissionError:
-            issues.append({"type": "permission_error", "system": system_dir})
+        except (PermissionError, OSError) as e:
+            # One unreadable folder must not abort the whole scan: record it and continue.
+            if isinstance(e, PermissionError):
+                issues.append({"type": "permission_error", "system": system_dir})
+            else:
+                issues.append({"type": "scan_error", "system": system_dir,
+                               "errno": getattr(e, "errno", None), "error": str(e)})
+                logger.warning(f"Scan of {system_dir} failed: {e}")
             with _cache_lock:
-                scan_cache["issues"] = list(issues)
+                _pending_scan["issues"] = list(issues)
                 scan_progress["systems_done"] += 1
                 scan_progress["current_system"] = system_dir
                 scan_progress["files_so_far"] = total_files
@@ -1487,18 +1501,22 @@ def _scan_inventory() -> dict:
             "deep_pending": True,         # cleared by Phase 2 once diagnostics run
         }
         with _cache_lock:
-            scan_cache["systems"][system_dir] = sys_entry
-            scan_cache["gamelists"][system_dir] = gamelist
-            scan_cache["issues"] = list(issues)
-            scan_cache["stats"] = _compute_stats()
+            new_systems[system_dir] = sys_entry
+            new_gamelists[system_dir] = gamelist
+            _pending_scan["issues"] = list(issues)
             scan_progress["systems_done"] += 1
             scan_progress["current_system"] = system_dir
             scan_progress["files_so_far"] = total_files
 
-    # Inventory complete — publish last_scan + partial stats so the UI is fully usable now.
+    # Inventory complete — atomically replace the previous inventory with the new one.
     with _cache_lock:
+        scan_cache["systems"] = new_systems
+        scan_cache["gamelists"] = new_gamelists
+        scan_cache["issues"] = list(issues)
+        scan_cache["duplicates"] = []
         scan_cache["last_scan"] = datetime.now().isoformat()
         scan_cache["stats"] = _compute_stats()
+        _pending_scan.clear()
 
     logger.info(f"Inventory complete: {total_files} files across {len(system_dirs)} folders")
     return {"ok": True}
@@ -1635,7 +1653,9 @@ def _run_scan_bg() -> None:
         res = _scan_inventory()
         if "error" in res:
             with _cache_lock:
-                scan_progress.update({"running": False, "phase": "error", "error": res["error"]})
+                _pending_scan.clear()
+                scan_progress.update({"running": False, "phase": "error", "error": res["error"],
+                                      "stale": bool(scan_cache.get("systems"))})
             logger.error(f"Scan failed: {res['error']}")
             return
         _scan_deep()
@@ -1650,7 +1670,9 @@ def _run_scan_bg() -> None:
     except Exception as e:  # noqa: BLE001 — never leave running=True on a crash
         logger.exception("Background scan crashed")
         with _cache_lock:
-            scan_progress.update({"running": False, "phase": "error", "error": str(e)})
+            _pending_scan.clear()
+            scan_progress.update({"running": False, "phase": "error", "error": str(e),
+                                  "stale": bool(scan_cache.get("systems"))})
 
 
 # Hard ceiling for any single downloaded image. Cover art is normally well under a few MB;
@@ -1832,12 +1854,22 @@ def scan_progress_status():
     can render systems and climbing counts before the scan finishes."""
     with _cache_lock:
         progress = dict(scan_progress)
-        systems = {
-            key: {k: v for k, v in sys_info.items() if k != "roms"}
-            for key, sys_info in scan_cache.get("systems", {}).items()
-        }
-        stats = scan_cache.get("stats") or None
-        last_scan = scan_cache.get("last_scan")
+        if _pending_scan:
+            # Inventory in progress: show the new systems as they arrive; the previous
+            # inventory stays in scan_cache untouched until the swap.
+            systems = {
+                key: {k: v for k, v in sys_info.items() if k != "roms"}
+                for key, sys_info in _pending_scan["systems"].items()
+            }
+            stats = _compute_stats(_pending_scan)
+            last_scan = scan_cache.get("last_scan")
+        else:
+            systems = {
+                key: {k: v for k, v in sys_info.items() if k != "roms"}
+                for key, sys_info in scan_cache.get("systems", {}).items()
+            }
+            stats = scan_cache.get("stats") or None
+            last_scan = scan_cache.get("last_scan")
     return jsonify({
         "progress": progress,
         "systems": systems,
