@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.19 — 2026-11-09
+### Fixed
+- **`strip-smc-header` rewrote the ROM in place non-atomically and could skip the backup** (#19) — the headerless ROM is now written to `<rom>.tmp` and swapped in with `os.replace`, so a dropped connection can't truncate it. A backup is always taken: `<rom>.bak`, or a timestamped `<rom>.<YYYYmmdd-HHMMSS>.bak` if a `.bak` already exists (a stale one may belong to a different file). The cached ROM size is updated. The file is **not** renamed to `.sfc` — both extensions are valid for SNES and keeping the name keeps the gamelist entry and cover linked; the docs now say so.
+
 ## v2026.07.18 — 2026-11-09
 ### Fixed
 - **Moving a ROM left its metadata and cover behind** (#18) — `/api/move` and `/api/bulk-move` now carry the ROM's `gamelist.xml` `<game>` entry (name, description, rating…) and its cover/thumbnail/marquee/video files to the destination system: the entry is removed from the source gamelist and inserted into the destination's, media files are renamed across the share (never overwriting; a numeric suffix is added on collision) and the `<image>` paths are rewritten. If the destination already has an entry, the source entry is just dropped. The cache flags (`has_cover`, `has_description`, `cover_url`, counters) are refreshed so the ROM doesn't reappear under Missing Covers/Descriptions. The response includes a `metadata` summary.

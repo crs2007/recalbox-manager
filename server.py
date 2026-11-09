@@ -128,7 +128,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.18"
+APP_VERSION = "2026.07.19"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -2869,17 +2869,37 @@ def fix_strip_smc_header():
             "error": "no_header_detected",
             "detail": f"File size {size} bytes does not match copier header pattern (size % 1024 != 512)",
         }), 400
+    # Backup: never reuse a stale .bak (it may belong to an earlier, different file with the
+    # same name). If <rom>.bak exists, take a timestamped one instead.
     bak_path = rom_path + ".bak"
-    if not os.path.exists(bak_path):
-        try:
-            shutil.copy2(rom_path, bak_path)
-        except OSError as e:
-            return jsonify({"error": "backup_failed", "detail": str(e)}), 500
+    if os.path.exists(bak_path):
+        bak_path = f"{rom_path}.{datetime.now().strftime('%Y%m%d-%H%M%S')}.bak"
     try:
-        with open(rom_path, "wb") as f:
-            f.write(data_bytes[512:])
+        shutil.copy2(rom_path, bak_path)
     except OSError as e:
+        return jsonify({"error": "backup_failed", "detail": str(e)}), 500
+    # Write the headerless ROM to a temp file, then atomically replace the original so a
+    # dropped SMB connection can never leave a truncated ROM behind.
+    tmp_path = rom_path + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data_bytes[512:])
+        os.replace(tmp_path, rom_path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return jsonify({"error": "write_error", "detail": str(e)}), 500
+    new_size = size - 512
+    with _cache_lock:
+        for rom in scan_cache.get("systems", {}).get(system, {}).get("roms", []):
+            if rom.get("name") == filename:
+                rom["size"] = new_size
+                rom["size_human"] = format_size(new_size)
+                break
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
     logger.info("Stripped 512-byte SMC copier header from %s (backup: %s)", rom_path, bak_path)
     _remove_diag_from_cache(system, "smc_copier_header", filename)
     return jsonify({"ok": True, "bytes_removed": 512, "backup": os.path.basename(bak_path)})
