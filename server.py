@@ -39,6 +39,49 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # API via the browser.
 CORS(app, origins=[r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"])
 
+# ─── Request guard: DNS-rebinding + CSRF protection ───────────────────────────
+# The API is unauthenticated and powerful (it can repoint the share path, overwrite BIOS
+# files, trash ROMs). CORS only stops other sites *reading* responses, so we also:
+#   1. require the Host header to be a loopback name or an IP literal (a rebound attacker
+#      domain still sends its own hostname, so it is rejected), and
+#   2. require a custom header on every mutating request. A cross-site page cannot send it
+#      without a CORS preflight, which the CORS policy above refuses, and an Origin that
+#      doesn't match Host is rejected outright.
+_REQUIRED_HEADER = ("X-Requested-With", "recalbox-manager")
+_EXTRA_ALLOWED_HOSTS = {
+    h.strip().lower() for h in os.environ.get("RECALBOX_ALLOWED_HOSTS", "").split(",") if h.strip()
+}
+
+
+def _host_is_allowed(host_header: str) -> bool:
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):                      # [::1]:5123
+        name = host[1:].split("]")[0]
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if name == "localhost" or name in _EXTRA_ALLOWED_HOSTS:
+        return True
+    try:
+        ipaddress.ip_address(name)                 # an IP literal cannot be DNS-rebound
+        return True
+    except ValueError:
+        return False
+
+
+@app.before_request
+def _guard_request():
+    if not _host_is_allowed(request.host):
+        return jsonify({"error": "forbidden_host"}), 403
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin = request.headers.get("Origin")
+    if origin and urllib.parse.urlparse(origin).netloc.lower() != request.host.lower():
+        return jsonify({"error": "forbidden_origin"}), 403
+    if request.headers.get(_REQUIRED_HEADER[0]) != _REQUIRED_HEADER[1]:
+        return jsonify({"error": "missing_csrf_header"}), 403
+    return None
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 import collections as _collections
@@ -63,7 +106,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.10"
+APP_VERSION = "2026.07.11"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1804,7 +1847,16 @@ def set_config():
         # while the Recalbox is offline.
         if not isinstance(share_path, str) or not share_path.strip() or "\x00" in share_path:
             return jsonify({"error": "Invalid share_path"}), 400
-        _config["share"] = share_path.strip()
+        new_share = share_path.strip()
+        # Repointing at a different network host makes Windows authenticate to it (NTLM) and
+        # then every ROM operation reads/writes there — require explicit confirmation.
+        def _unc_host(p):
+            m = re.match(r"^[\\/]{2}([^\\/]+)", p)
+            return m.group(1).lower() if m else None
+        new_host, old_host = _unc_host(new_share), _unc_host(_config["share"])
+        if new_host and new_host != old_host and not data.get("confirm_host_change"):
+            return jsonify({"error": "host_change_requires_confirmation", "host": new_host}), 409
+        _config["share"] = new_share
     ss_changed = False
     for key in ("screenscraper_user", "screenscraper_pass", "screenscraper_devid", "screenscraper_devpass"):
         if key in data:

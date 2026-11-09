@@ -667,7 +667,7 @@ const state = {
 async function api(path, opts = {}) {
   try {
     const r = await fetch(API + path, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'recalbox-manager' },
       ...opts,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
@@ -881,7 +881,11 @@ ${Object.entries(diagByType).map(([k,v])=>`  ${k}: ${v.count} (${v.severity})`).
 }
 
 async function updateConfig(sharePath) {
-  const r = await api('/config', { method: 'POST', body: { share_path: sharePath } });
+  let r = await api('/config', { method: 'POST', body: { share_path: sharePath } });
+  if (r.error === 'host_change_requires_confirmation') {
+    if (!confirm(`Switch to a different network host "${r.host}"?\n\nWindows will authenticate to that machine and all ROM operations will read/write there. Only continue if you trust it.`)) { render(); return; }
+    r = await api('/config', { method: 'POST', body: { share_path: sharePath, confirm_host_change: true } });
+  }
   if (!r.error) { state.config = r; toast('Path updated', 'success'); }
   render();
 }
@@ -1185,7 +1189,7 @@ async function fixUploadBios(system, expectedFilename, file) {
   let r;
   try {
     // Must use raw fetch — api() hardcodes JSON content-type which breaks multipart
-    const resp = await fetch(API + '/fix/upload-bios', { method: 'POST', body: fd });
+    const resp = await fetch(API + '/fix/upload-bios', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'recalbox-manager' } });
     r = await resp.json();
   } catch (e) {
     delete state.fixing[key];

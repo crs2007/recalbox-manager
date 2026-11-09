@@ -10,6 +10,7 @@ module.exports = defineConfig({
   use: {
     baseURL: 'http://localhost:15123',
     actionTimeout: 10_000,
+    extraHTTPHeaders: { 'X-Requested-With': 'recalbox-manager' },
   },
 
   projects: [

@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.11 — 2026-11-09
+### Security
+- **No Host/Origin check: DNS rebinding and CSRF could drive the API** (#11) — a `before_request` guard now rejects any request whose `Host` is not `localhost`, an IP literal, or listed in `RECALBOX_ALLOWED_HOSTS` (defeats DNS rebinding), rejects mutating requests whose `Origin` doesn't match `Host`, and requires an `X-Requested-With: recalbox-manager` header on every non-GET request (the UI and the Playwright config send it; a cross-site page can't without a preflight). Changing `share_path` to a UNC path on a *different host* now needs explicit confirmation (`confirm_host_change`) so a forged request can't silently leak NTLM credentials to another machine.
+
 ## v2026.07.10 — 2026-11-09
 ### Security
 - **Path traversal / arbitrary file write via unvalidated `system` / `filename` / `game_name`** (#10) — new `_bad_sys_file()` validator (plain folder name that is a known system or scanned folder; filename must be a bare basename; no separators, drive letters, NUL or dot-dot) is applied to `/api/gamelist/update`, `/api/gamelist/repair`, `/api/covers/scrape`, `/api/descriptions/scrape` and `/api/covers/download-url`, and defensively inside `_save_cover_image()` and the gamelist writer. `generate-m3u` rejects `game_name` with illegal path characters, and `/api/config` rejects non-string ScreenScraper credentials instead of crashing.
