@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.4"
+APP_VERSION = "2026.07.5"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -2851,6 +2851,10 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
         if "timed out" in str(e).lower():
             return {"ok": False, "error": "timeout"}
         return {"ok": False, "error": "ss_down", "detail": str(e)}
+    except (TimeoutError, socket.timeout):
+        return {"ok": False, "error": "timeout"}
+    except OSError as e:
+        return {"ok": False, "error": "ss_down", "detail": str(e)}
 
     try:
         data = json.loads(raw)
@@ -2859,9 +2863,12 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
 
     # Check for rate limit in response body
     ssuser = data.get("response", {}).get("ssuser", {})
-    if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
-        if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
-            return {"ok": False, "error": "rate_limited"}
+    try:
+        if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
+            if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
+                return {"ok": False, "error": "rate_limited"}
+    except (TypeError, ValueError):
+        pass  # non-numeric quota fields — ignore, the request itself succeeded
 
     # Navigate to media list
     jeu = data.get("response", {}).get("jeu")
@@ -2902,8 +2909,16 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     try:
         with urllib.request.urlopen(img_url, timeout=15) as img_resp:
             img_data = _read_capped(img_resp)
-    except Exception as e:
-        return {"ok": False, "error": "timeout", "detail": str(e)}
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 430):
+            return {"ok": False, "error": "rate_limited"}
+        return {"ok": False, "error": "not_found", "detail": f"image HTTP {e.code}"}
+    except ValueError as e:  # oversize body from _read_capped
+        return {"ok": False, "error": "not_found", "detail": str(e)}
+    except (TimeoutError, socket.timeout):
+        return {"ok": False, "error": "timeout"}
+    except OSError as e:
+        return {"ok": False, "error": "ss_down", "detail": str(e)}
 
     return _save_cover_image(system_key, rom_filename, img_data, img_ext, "screenscraper")
 
@@ -3006,6 +3021,10 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
         if "timed out" in str(e).lower():
             return {"ok": False, "error": "timeout"}
         return {"ok": False, "error": "ss_down", "detail": str(e)}
+    except (TimeoutError, socket.timeout):
+        return {"ok": False, "error": "timeout"}
+    except OSError as e:
+        return {"ok": False, "error": "ss_down", "detail": str(e)}
 
     try:
         data = json.loads(raw)
@@ -3013,9 +3032,12 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
         return {"ok": False, "error": "not_found"}
 
     ssuser = data.get("response", {}).get("ssuser", {})
-    if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
-        if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
-            return {"ok": False, "error": "rate_limited"}
+    try:
+        if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
+            if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
+                return {"ok": False, "error": "rate_limited"}
+    except (TypeError, ValueError):
+        pass
 
     jeu = data.get("response", {}).get("jeu")
     if not jeu:
@@ -3297,7 +3319,10 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
 # ---------------------------------------------------------------------------
 
 # Errors that mean "this source can't help, try next" vs. transient failures
-FALLBACK_ERRORS = {"not_found", "no_credentials", "no_devid", "unsupported_system"}
+# A per-source timeout or crash must not abort the chain; only rate_limited (and the
+# *_down codes the UI keys on) stop it.
+FALLBACK_ERRORS = {"not_found", "no_credentials", "no_devid", "unsupported_system",
+                   "timeout", "source_error"}
 
 SCRAPE_SOURCES = [
     {
@@ -3348,11 +3373,18 @@ def _run_fallback_chain(scrape_type, system_key, rom_filename, game_name=""):
         if not fn:
             continue
 
-        # Call with appropriate signature
-        if scrape_type == "cover":
-            result = fn(system_key, rom_filename, game_name)
-        else:
-            result = fn(rom_filename, game_name)
+        # Sources promise "never raises", but a read timeout or oversize body can still
+        # escape; contain it here so one bad source can't 500 the request or skip the rest.
+        try:
+            if scrape_type == "cover":
+                result = fn(system_key, rom_filename, game_name)
+            else:
+                result = fn(rom_filename, game_name)
+        except (TimeoutError, socket.timeout):
+            result = {"ok": False, "error": "timeout"}
+        except Exception as e:
+            logger.exception(f"[{source['name']}] unexpected error for {rom_filename}")
+            result = {"ok": False, "error": "source_error", "detail": str(e)}
 
         if result["ok"]:
             logger.info(f"[{source['name']}] Success for {rom_filename}")

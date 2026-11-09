@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.5 — 2026-11-09
+### Fixed
+- **Scrape sources broke their "never raises" contract** (#5) — `_run_fallback_chain` now contains timeouts and unexpected exceptions per source (`timeout` / `source_error`) instead of returning a 500. `timeout` and `source_error` now fall through to the next source; `rate_limited` still stops the chain. ScreenScraper: read timeouts and non-numeric quota fields are handled, and image-download failures are classified (404/oversize → `not_found`, timeout → `timeout`) instead of all being reported as `timeout`, which used to stop the chain before Libretro. The frontend `api()` helper now reports the HTTP status when the response isn't JSON instead of "Unexpected token <".
+
 ## v2026.07.4 — 2026-11-09
 ### Fixed
 - **M3U Auto-Fix button never worked** (#4) — the file list was `JSON.stringify`d inside a double-quoted `onclick`, a syntax error. The data now lives in `data-*` attributes read by `fixM3uFromBtn()`.

@@ -671,6 +671,11 @@ async function api(path, opts = {}) {
       ...opts,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+      const msg = `Server error (HTTP ${r.status})`;
+      return { error: msg };
+    }
     return await r.json();
   } catch (e) {
     toast('Connection error: ' + e.message, 'error');
