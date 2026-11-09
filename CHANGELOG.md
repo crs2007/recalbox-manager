@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.17 — 2026-11-09
+### Fixed
+- **Gamelist writer rejected gamelists the reader could recover; repair raced it; `.bak` was useless** (#17) — new shared `_load_gamelist_tree()` is used by both the reader and the writer, so a gamelist with trailing junk after `</gameList>` is repaired on the fly while saving instead of failing every scrape with `xml_parse_error`. `/api/gamelist/repair` now runs under `_gamelist_lock` (the same lock as `write_gamelist_entry`). `gamelist.xml.bak` is written once per session per system (the pre-session state — a real rollback point) instead of on every write, halving SMB write I/O. `lstrip("./")` (which strips *characters*) is replaced by `_strip_dot_slash()` (prefix only), so names like `.hack//G.U.` are no longer mangled, and `<image>` paths with `..` or absolute components are no longer resolved.
+
 ## v2026.07.16 — 2026-11-09
 ### Fixed
 - **Bulk scrape ignored rate-limit / credential errors and spent ScreenScraper quota twice per ROM** (#16) — the queue now stops on `rate_limited`, `no_credentials` and `no_devid` with a single toast, keeps the remaining items (the failed one stays at the head) and offers a **Resume** button instead of firing thousands of doomed requests and error toasts. The cover and description fetchers now share one cached `jeuInfos` call per ROM (`_ss_fetch_jeu`, 1 h TTL, not-found results cached too), halving quota use when both are scraped. The latest `requeststoday` / `maxrequestsperday` is returned as `ss_quota` on scrape responses and the queue slows down (3 s / 6 s) when little daily quota remains. SS plain-text quota messages (HTTP 200) are now recognised as `rate_limited`.

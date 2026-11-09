@@ -128,7 +128,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.16"
+APP_VERSION = "2026.07.17"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1200,6 +1200,41 @@ def run_rom_diagnostics(
     return diag_issues
 
 
+def _strip_dot_slash(p: str) -> str:
+    """Drop a leading "./" (or ".\\") PREFIX from a gamelist path. Unlike str.lstrip("./") this
+    removes the prefix, not any run of '.' and '/' characters, so ".hack//G.U..." or
+    "..\\x" are not mangled."""
+    p = p or ""
+    if p.startswith("./") or p.startswith(".\\"):
+        p = p[2:]
+    return p
+
+
+def _load_gamelist_tree(xml_path: str, info: dict | None = None):
+    """Parse a gamelist.xml, recovering from trailing junk after </gameList>.
+
+    Returns an ElementTree. If `info` is given it is filled with corrupted / error /
+    recoverable / repair_kind. Raises ET.ParseError (unrecoverable) or OSError."""
+    try:
+        return ET.parse(xml_path)
+    except ET.ParseError as e:
+        if info is not None:
+            info["corrupted"] = True
+            info["error"] = str(e)
+        with open(xml_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+        end_tag = "</gameList>"
+        idx = raw.rfind(end_tag)
+        if idx < 0:
+            raise
+        tree = ET.ElementTree(ET.fromstring(raw[: idx + len(end_tag)]))
+        if info is not None:
+            info["recoverable"] = True
+            info["repair_kind"] = "trailing_junk"
+        logger.info(f"Recovered malformed gamelist.xml {xml_path} (trailing junk stripped)")
+        return tree
+
+
 def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
     """
     Parse <_roms_root()>/<system_dir>/gamelist.xml and return a dict keyed by
@@ -1219,26 +1254,7 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
         info.update({"present": os.path.exists(xml_path), "corrupted": False,
                      "recoverable": False, "error": None, "repair_kind": None})
     try:
-        try:
-            tree = ET.parse(xml_path)
-        except ET.ParseError as e:
-            if info is not None:
-                info["corrupted"] = True
-                info["error"] = str(e)
-            # Try to recover from trailing junk after </gameList>
-            with open(xml_path, "r", encoding="utf-8", errors="replace") as f:
-                raw = f.read()
-            end_tag = "</gameList>"
-            idx = raw.rfind(end_tag)
-            if idx >= 0:
-                raw = raw[: idx + len(end_tag)]
-                tree = ET.ElementTree(ET.fromstring(raw))
-                if info is not None:
-                    info["recoverable"] = True
-                    info["repair_kind"] = "trailing_junk"
-                logger.info(f"Recovered malformed gamelist.xml for {system_dir} (trailing junk stripped)")
-            else:
-                raise
+        tree = _load_gamelist_tree(xml_path, info)
         root = tree.getroot()
         # First pass: collect entries and resolve absolute image paths (no I/O yet).
         pending = []
@@ -1247,7 +1263,7 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
             if path_el is None or not path_el.text:
                 continue
             # <path> is like ./game.smc — extract basename
-            raw_path = path_el.text.lstrip("./").lstrip("\\")
+            raw_path = _strip_dot_slash(path_el.text)
             basename = os.path.basename(raw_path.replace("\\", "/"))
             stem = os.path.splitext(basename)[0].lower()
 
@@ -1262,8 +1278,11 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
 
             # Resolve image path relative to the system folder (strip leading ./)
             if image_rel:
-                image_clean = image_rel.lstrip("./").lstrip("\\").replace("/", os.sep)
-                image_abs = os.path.join(_roms_root(), system_dir, image_clean)
+                image_clean = _strip_dot_slash(image_rel).replace("\\", "/")
+                if ".." in image_clean.split("/") or os.path.isabs(image_clean) or ":" in image_clean:
+                    image_abs = None      # never resolve outside the system folder
+                else:
+                    image_abs = os.path.join(_roms_root(), system_dir, image_clean.replace("/", os.sep))
             else:
                 image_abs = None
 
@@ -3008,6 +3027,9 @@ def write_gamelist_entry(system_dir, rom_filename, fields):
         return _write_gamelist_entry_locked(system_dir, rom_filename, fields)
 
 
+_gamelist_bak_done: set = set()   # systems whose gamelist.xml.bak was taken this session
+
+
 def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
     if _bad_sys_file(system_dir, rom_filename):
         return {"ok": False, "error": "invalid_path", "detail": "invalid system or filename"}
@@ -3018,8 +3040,11 @@ def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
     # Read existing XML or create a minimal tree
     if os.path.exists(xml_path):
         try:
-            tree = ET.parse(xml_path)
+            rec_info: dict = {}
+            tree = _load_gamelist_tree(xml_path, rec_info)
             root = tree.getroot()
+            if rec_info.get("recoverable"):
+                logger.warning(f"gamelist.xml for {system_dir} had trailing junk; repaired while saving")
         except ET.ParseError as e:
             return {"ok": False, "error": "xml_parse_error", "detail": str(e)}
     else:
@@ -3032,7 +3057,7 @@ def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
     for game in root.findall("game"):
         path_el = game.find("path")
         if path_el is not None and path_el.text:
-            existing_basename = os.path.basename(path_el.text.lstrip("./").replace("\\", "/")).lower()
+            existing_basename = os.path.basename(_strip_dot_slash(path_el.text).replace("\\", "/")).lower()
             if existing_basename == target_basename:
                 found = game
                 break
@@ -3051,10 +3076,12 @@ def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
                 el = ET.SubElement(found, field_name)
             el.text = str(fields[field_name])
 
-    # Backup existing file before write
-    if os.path.exists(xml_path):
+    # Backup once per session per system: this .bak is the pre-session state, a real rollback
+    # point (copying on every write would only ever hold "one write ago" and double the I/O).
+    if os.path.exists(xml_path) and system_dir not in _gamelist_bak_done:
         try:
             shutil.copy2(xml_path, bak_path)
+            _gamelist_bak_done.add(system_dir)
         except OSError:
             pass  # Non-fatal — proceed without backup
 
@@ -3111,7 +3138,12 @@ def repair_gamelist():
     err = _bad_sys_file(system)
     if err:
         return jsonify({"error": err}), 400
+    # Same lock as write_gamelist_entry so repair can't interleave with a scrape's write.
+    with _gamelist_lock:
+        return _repair_gamelist_locked(system)
 
+
+def _repair_gamelist_locked(system):
     xml_path = os.path.join(_roms_root(), system, "gamelist.xml")
     if not os.path.exists(xml_path):
         return jsonify({"ok": False, "error": "not_found"}), 404
@@ -3152,6 +3184,7 @@ def repair_gamelist():
     tmp_path = xml_path + ".tmp"
     try:
         shutil.copy2(xml_path, bak_path)
+        _gamelist_bak_done.add(system)
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(fixed)
         os.replace(tmp_path, xml_path)
