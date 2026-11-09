@@ -129,7 +129,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.20"
+APP_VERSION = "2026.07.21"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -2076,7 +2076,11 @@ def get_system(system_name):
         sys_info = scan_cache.get("systems", {}).get(system_name)
         if not sys_info:
             return jsonify({"error": "System not found"}), 404
-        return jsonify(sys_info)
+        # The UI never uses the absolute UNC path of each ROM; leaving it out shrinks the
+        # payload and doesn't leak the share layout.
+        slim = dict(sys_info)
+        slim["roms"] = [{k: v for k, v in r.items() if k != "path"} for r in sys_info.get("roms", [])]
+        return jsonify(slim)
 
 
 @app.route("/api/issues")
@@ -2723,6 +2727,12 @@ def _remove_diag_from_cache(system: str, diag_key: str, filename: str) -> None:
                 break
         if removed and scan_cache.get("stats"):
             scan_cache["stats"] = _compute_stats()
+
+
+def _stats_snapshot():
+    """Copy of the current stats block (or None before the first scan)."""
+    with _cache_lock:
+        return dict(scan_cache["stats"]) if scan_cache.get("stats") else None
 
 
 def _apply_scrape_to_cache(system, filename, *, cover_url=None, has_desc=False, game_name=""):
@@ -4192,7 +4202,7 @@ def scrape_cover():
     if write_result.get("ok"):
         _apply_scrape_to_cache(system, filename, cover_url=result["cover_url"], game_name=game_name)
 
-    return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
+    return jsonify({**result, "gamelist_updated": write_result.get("ok", False), "stats": _stats_snapshot()})
 
 
 @app.route("/api/descriptions/scrape", methods=["POST"])
@@ -4234,7 +4244,7 @@ def scrape_description():
     if write_result.get("ok"):
         _apply_scrape_to_cache(system, filename, has_desc=True, game_name=game_name)
 
-    return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
+    return jsonify({**result, "gamelist_updated": write_result.get("ok", False), "stats": _stats_snapshot()})
 
 
 @app.route("/api/covers/download-url", methods=["POST"])

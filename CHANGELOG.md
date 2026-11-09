@@ -2,6 +2,11 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.21 — 2026-11-09
+### Performance
+- **The frontend re-downloaded the whole system's ROM list and re-rendered the whole app on every scrape, poll tick and toast** (#21) — scrape responses now carry the updated `stats` and the UI patches the open system's ROM row in place instead of calling `loadSystem()` + `/api/status` after every ROM (which also stops resetting the page and filter). Toasts render into their own `#toasts` container and never touch `#app`. Scan polling re-renders the app only when a system was committed or the phase changed; otherwise it repaints just the progress bar. Browse view memoizes its sort per system with a shared `Intl.Collator` and cards use an index-based delegated click instead of embedding `JSON.stringify(rom)` in every card. The nine post-scan requests now run in parallel, and `/api/systems/<name>` no longer includes each ROM's absolute UNC `path`.
+- Not done: server-side pagination/filtering for `/api/systems/<name>` (the list UIs still paginate client-side).
+
 ## v2026.07.20 — 2026-11-09
 ### Performance
 - **Each gamelist write cost O(gamelist size) in SMB I/O while holding the global lock** (#20) — gamelist writes run under their own `_gamelist_lock` (the global `_cache_lock` is only held for in-memory work, so `/api/scan/progress` and the scan no longer stall behind a bulk scrape). A parsed tree is cached per system (reloaded if the file changed on disk), the post-write re-parse + `scandir` is gone (the in-memory gamelist cache is updated in place), and the per-write `.bak` copy was already removed. Bulk scrapes send `defer:true`, which batches the disk write: one flush per 25 updates, after 10 s idle, at the end/stop of the queue (`POST /api/gamelist/flush`) and at exit. Scans, moves and repair flush pending edits first. A bulk run goes from ~5 full-file transfers per ROM to ~1 write per 25 ROMs.

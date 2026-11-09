@@ -588,6 +588,7 @@ tr:hover td { background: rgba(56, 189, 248, 0.03); }
 </head>
 <body>
 <div class="app" id="app"></div>
+<div id="toasts"></div>
 <input type="file" id="biosFileInput" style="display:none" accept="*/*">
 
 <script>
@@ -686,13 +687,19 @@ async function api(path, opts = {}) {
 }
 
 function toast(msg, type = 'info') {
-  const t = { msg, type, id: Date.now() };
+  const t = { msg, type, id: Date.now() + Math.random() };
   state.toasts.push(t);
-  render();
+  paintToasts();
   setTimeout(() => {
     state.toasts = state.toasts.filter(x => x.id !== t.id);
-    render();
+    paintToasts();
   }, 3500);
+}
+// Toasts live in their own container (#toasts, outside #app), so showing/hiding one never
+// re-renders the whole application.
+function paintToasts() {
+  const el = document.getElementById('toasts');
+  if (el) el.innerHTML = renderToasts();
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
@@ -921,11 +928,20 @@ async function startScan() {
       const p = await api('/scan/progress');
       if (p && !p.error) {
         pollErrors = 0;
+        const prev = state.scanProgress || {};
         state.scanProgress = p.progress || null;
         if (p.systems) state.systems = p.systems;
         if (p.stats) state.stats = p.stats;
         if (p.last_scan) state.lastScan = p.last_scan;
-        render();
+        // Re-render the whole app only when something structural changed (a system was
+        // committed, or the phase flipped); otherwise just repaint the progress bar.
+        const np = state.scanProgress || {};
+        const barEl = document.querySelector('.scan-progress');
+        if (!barEl || np.systems_done !== prev.systems_done || np.phase !== prev.phase) {
+          render();
+        } else {
+          barEl.outerHTML = renderScanProgress();
+        }
         const phase = p.progress && p.progress.phase;
         if (phase === 'error') {
           state.scanning = false; state.scanProgress = null;
@@ -952,23 +968,18 @@ async function startScan() {
 
   // Final consolidated loads. Always refetch /systems and /status so the grid and stats are
   // populated regardless of how the scan completed (streaming poll, sync, or fallback).
-  const sys = await api('/systems');
+  const [sys, st, iss, dups, diags, bios, missing, missingDescs, cfg] = await Promise.all([
+    api('/systems'), api('/status'), api('/issues'), api('/duplicates'), api('/diagnostics'),
+    api('/bios'), api('/covers/missing'), api('/descriptions/missing'), api('/config'),
+  ]);
   if (!sys.error) state.systems = sys;
-  const st = await api('/status');
   if (st && st.stats) { state.stats = st.stats; state.lastScan = st.last_scan; }
-  const iss = await api('/issues');
   if (!iss.error) state.issues = iss;
-  const dups = await api('/duplicates');
   if (!dups.error) state.duplicates = dups;
-  const diags = await api('/diagnostics');
   if (!diags.error) state.diagnostics = diags;
-  const bios = await api('/bios');
   if (!bios.error) state.biosStatus = bios;
-  const missing = await api('/covers/missing');
   if (Array.isArray(missing)) state.missingCovers = missing;
-  const missingDescs = await api('/descriptions/missing');
   if (Array.isArray(missingDescs)) state.missingDescriptions = missingDescs;
-  const cfg = await api('/config');
   if (!cfg.error) state.config = cfg;
   loadKB();
   const total = (state.stats && state.stats.total_files) || 0;
@@ -1237,6 +1248,20 @@ async function loadMissingCovers() {
   render();
 }
 
+// Update one ROM in the currently open system (and the browse cache) without a refetch.
+function patchRomLocally(system, filename, fields) {
+  const sel = state.selectedSystem;
+  if (sel && sel.folder === system && Array.isArray(sel.roms)) {
+    const rom = sel.roms.find(x => x.name === filename);
+    if (rom) Object.assign(rom, fields);
+  }
+  const cached = browseRomsCache[system];
+  if (Array.isArray(cached)) {
+    const rom = cached.find(x => x.name === filename);
+    if (rom) Object.assign(rom, fields);
+  }
+}
+
 async function scrapeCover(filename, system, gameName) {
   const key = system + '/' + filename;
   state.coverScraping[key] = true;
@@ -1250,11 +1275,10 @@ async function scrapeCover(filename, system, gameName) {
       toast('Cover saved for ' + filename + (r.source ? ' (via ' + r.source + ')' : ''), 'success');
       state.missingCovers = state.missingCovers.filter(m => !(m.name === filename && m.system === system));
     }
-    // Reload system detail if open, and refresh missing covers list
-    if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
-    // Refresh dashboard stats
-    const st = await api('/status');
-    if (st.stats) state.stats = st.stats;
+    // The response already carries everything that changed: patch the open system's ROM row
+    // and the stats in place instead of re-downloading the whole ROM list.
+    patchRomLocally(system, filename, { has_cover: true, cover_url: r.cover_url, has_metadata: true });
+    if (r.stats) state.stats = r.stats;
   } else {
     const msgs = {
       no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
@@ -1348,10 +1372,8 @@ async function scrapeDescription(filename, system, gameName) {
       toast('Description saved for ' + filename + (r.source ? ' (via ' + r.source + ')' : ''), 'success');
       state.missingDescriptions = state.missingDescriptions.filter(m => !(m.name === filename && m.system === system));
     }
-    if (state.selectedSystem && state.selectedSystem.folder === system) await loadSystem(state.selectedSystem.folder);
-    // Refresh dashboard stats
-    const st = await api('/status');
-    if (st.stats) state.stats = st.stats;
+    patchRomLocally(system, filename, { has_description: true, has_metadata: true });
+    if (r.stats) state.stats = r.stats;
   } else {
     const msgs = {
       no_credentials: 'Set ScreenScraper username & password first (click 🖼 ScreenScraper in config bar)',
@@ -1540,7 +1562,6 @@ function render() {
     ${state.editModal ? renderEditModal() : ''}
     ${state.modal ? renderModal() : ''}
     ${renderBugReportModal()}
-    ${renderToasts()}
     ${renderFooter()}
   `;
   window.scrollTo({ top: scrollY, behavior: 'instant' });
@@ -2774,16 +2795,31 @@ function renderBrowse() {
   `;
 }
 
+// One shared collator + a per-system memo of the sorted, placed-only list, so typing in the
+// filter box or showing a toast doesn't re-sort every system's ROMs.
+const browseCollator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: false });
+const browseSortMemo = new Map();   // key -> { src, len, sorted }
+window._browseView = {};            // key -> array currently shown (for delegated card clicks)
+function sortedPlacedRoms(key, src) {
+  const memo = browseSortMemo.get(key);
+  if (memo && memo.src === src && memo.len === src.length) return memo.sorted;
+  const sorted = src.filter(r => !r.issue)
+    .sort((a, b) => browseCollator.compare(a.game_name || a.name, b.game_name || b.name));
+  browseSortMemo.set(key, { src, len: src.length, sorted });
+  return sorted;
+}
+function showEditFromBrowse(key, idx) {
+  const rom = (window._browseView[key] || [])[idx];
+  if (rom) showEditModal(rom, key);
+}
+
 function renderBrowseRow(key, sys) {
-  let roms = browseRomsCache[key] || sys.roms || [];
+  let roms = sortedPlacedRoms(key, browseRomsCache[key] || sys.roms || []);
   if (state.browseFilter) {
     const q = state.browseFilter.toLowerCase();
     roms = roms.filter(r => (r.game_name || r.name).toLowerCase().includes(q));
   }
-  // Only show properly-placed ROMs in browse view
-  roms = roms.filter(r => !r.issue);
   if (!roms.length) return '';
-  roms.sort((a, b) => (a.game_name || a.name).localeCompare(b.game_name || b.name));
 
   const CARD_LIMIT = 50;
   const isExpanded = state.browseExpandedSystems[key];
@@ -2799,7 +2835,7 @@ function renderBrowseRow(key, sys) {
       <div class="browse-row-wrap">
         <button class="browse-scroll-btn left" data-scroll-target="${escHtml(key)}">◀</button>
         <div class="browse-row-scroll" id="browse-scroll-${escHtml(key)}">
-          ${displayRoms.map(r => renderBrowseCard(r, key)).join('')}
+          ${(window._browseView[key] = displayRoms, displayRoms.map((r, i) => renderBrowseCard(r, key, i)).join(''))}
           ${hasMore ? `<div class="browse-show-more" onclick="state.browseExpandedSystems['${escJs(key)}']=true;render()">+${roms.length - CARD_LIMIT} more</div>` : ''}
         </div>
         <button class="browse-scroll-btn right" data-scroll-target="${escHtml(key)}">▶</button>
@@ -2808,12 +2844,11 @@ function renderBrowseRow(key, sys) {
   `;
 }
 
-function renderBrowseCard(rom, systemFolder) {
+function renderBrowseCard(rom, systemFolder, idx) {
   const name = rom.game_name || rom.name.replace(/\.[^.]+$/, '');
-  const romData = JSON.stringify(rom).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
   const desc = rom.has_description ? '(has description)' : '';
   return `
-    <div class="browse-card" onclick='showEditModal(${escAttrJson(rom)}, "${escJs(systemFolder)}")'>
+    <div class="browse-card" onclick="showEditFromBrowse('${escJs(systemFolder)}', ${idx})">
       <div class="browse-card-img">
         ${rom.has_cover && rom.cover_url
           ? `<img src="${escHtml(rom.cover_url)}" loading="lazy" alt="${escHtml(name)}">`
