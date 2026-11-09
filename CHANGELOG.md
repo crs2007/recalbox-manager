@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.2 — 2026-11-09
+### Fixed
+- **Duplicate detection grouped different files together, and the UI offered to trash them** (#2) — candidates are now keyed by `(size, quick_hash)` and confirmed with a full streamed blake2b hash, so ROM hacks/revisions that share a 64 KB header are no longer reported. New `POST /api/duplicates/trash` re-verifies `files_identical()` on the server and refuses (409) on mismatch; the Duplicates tab and Issues tab now use it.
+
 ## v2026.07.1 — 2026-11-09
 ### Fixed
 - **Safe delete could silently overwrite an earlier trashed file** (#1) — `/api/delete`, `/api/move` (trashed duplicate) and `/api/bulk-move` used `shutil.move`, which on Windows falls back to copy-over when the target exists. All three now go through `_trash_file()`, which adds a `.YYYYmmdd-HHMMSS[.n]` suffix on collision, uses atomic `os.rename`, and returns `trash_path` in the JSON.

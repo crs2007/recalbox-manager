@@ -1002,6 +1002,25 @@ async function deleteRom(filename, system) {
   render();
 }
 
+async function trashDuplicate(keepSystem, keepFile, system, file) {
+  if (!confirm(`Move "${file}" (${system}) to trash?
+
+It will be verified byte-identical to ${keepSystem}/${keepFile} first.`)) return;
+  const r = await api('/duplicates/trash', { method: 'POST', body: { keep: { system: keepSystem, file: keepFile }, trash: { system, file } } });
+  if (r.ok) {
+    toast(`Trashed duplicate ${file}`, 'success');
+    const [dups, iss, st] = await Promise.all([api('/duplicates'), api('/issues'), api('/status')]);
+    if (!dups.error) state.duplicates = dups;
+    if (!iss.error) state.issues = iss;
+    if (!st.error) { state.stats = st.stats; state.lastScan = st.last_scan; }
+    delete browseRomsCache[system];
+    if (state.selectedSystem) loadSystem(state.selectedSystem.folder);
+  } else {
+    toast(r.error || 'Trash failed', 'error');
+  }
+  render();
+}
+
 async function repairGamelist(system) {
   if (!confirm(`Repair gamelist.xml for "${system}"?\n\nA .bak backup will be created in the system folder before overwriting. Trailing junk after </gameList> will be stripped.`)) return;
   const r = await api('/gamelist/repair', { method: 'POST', body: { system } });
@@ -1753,7 +1772,7 @@ function renderIssues() {
             <div class="issue-desc">${i.copies.map(c => `<strong>${escHtml(c.system)}</strong>/${escHtml(c.file)}`).join(' ⟷ ')}</div>
           </div>
           <div class="issue-actions">
-            ${i.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(c.file)}','${escJs(c.system)}')" title="Keep first copy, trash this one">🗑 ${escHtml(c.system)}</button>`).join('')}
+            ${i.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="trashDuplicate('${escJs(i.copies[0].system)}','${escJs(i.copies[0].file)}','${escJs(c.system)}','${escJs(c.file)}')" title="Keep first copy, trash this one (verified identical)">🗑 ${escHtml(c.system)}</button>`).join('')}
           </div>
         </div>`;
       if (i.type === 'permission_error') return `
@@ -1802,7 +1821,7 @@ function renderDuplicates() {
         </div>
       </div>
       <div class="issue-actions">
-        ${d.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(c.file)}','${c.system}')">🗑 ${c.system}</button>`).join('')}
+        ${d.copies.slice(1).map(c => `<button class="btn btn-sm btn-danger" onclick="trashDuplicate('${escJs(d.copies[0].system)}','${escJs(d.copies[0].file)}','${escJs(c.system)}','${escJs(c.file)}')" title="Keep first copy, trash this one (verified identical)">🗑 ${c.system}</button>`).join('')}
       </div>
     </div>
   `).join('');

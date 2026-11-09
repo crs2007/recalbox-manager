@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.1"
+APP_VERSION = "2026.07.2"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -683,6 +683,21 @@ def get_file_hash(filepath: str, block_size: int = _HASH_BLOCK_SIZE) -> str | No
         with open(filepath, "rb") as f:
             buf = f.read(block_size)
             h.update(buf)
+        return h.hexdigest()
+    except (OSError, IOError):
+        return None
+
+
+def get_full_hash(filepath: str) -> str | None:
+    """Return the blake2b hex digest of the whole file (streamed). None if unreadable."""
+    try:
+        h = hashlib.blake2b(digest_size=20)
+        with open(filepath, "rb") as f:
+            while True:
+                buf = f.read(1 << 20)
+                if not buf:
+                    break
+                h.update(buf)
         return h.hexdigest()
     except (OSError, IOError):
         return None
@@ -1487,14 +1502,26 @@ def _scan_deep() -> None:
                         (system_dir, rom["name"], rom["path"], rom["size"])
                     )
 
-    all_hashes: dict[str, list] = defaultdict(list)
+    # Quick 64 KB hash only selects candidates, keyed by (size, quick_hash). Each candidate
+    # group is then confirmed with a full-content hash, so ROM hacks / revisions that share a
+    # header are never reported as duplicates.
+    candidates: dict[tuple, list] = defaultdict(list)
     for size, group in size_index.items():
         if len(group) < 2:
             continue  # unique size — cannot be a duplicate, skip the hash read entirely
         for (s, name, path, sz) in group:
-            fhash = get_file_hash(path)
+            qhash = get_file_hash(path)
+            if qhash:
+                candidates[(size, qhash)].append((s, name, path, sz))
+
+    all_hashes: dict[str, list] = defaultdict(list)
+    for group in candidates.values():
+        if len(group) < 2:
+            continue
+        for (s, name, path, sz) in group:
+            fhash = get_full_hash(path)
             if fhash:
-                all_hashes[fhash].append((s, name, sz))
+                all_hashes[f"{sz}:{fhash}"].append((s, name, sz))
 
     duplicates = []
     dup_issues = []
@@ -1817,6 +1844,51 @@ def _trash_file(system, filename, src_path):
             raise OSError(f"Cannot find a free trash name for {filename}")
     os.rename(src_path, candidate)
     return candidate
+
+
+@app.route("/api/duplicates/trash", methods=["POST"])
+def trash_duplicate():
+    """Trash one copy of a duplicate group after re-verifying it is byte-identical to the kept copy.
+
+    Request body: {keep: {system, file}, trash: {system, file}}
+    """
+    data = request.get_json(silent=True) or {}
+    keep = data.get("keep") or {}
+    trash = data.get("trash") or {}
+    paths = []
+    for part in (keep, trash):
+        system, filename = part.get("system"), part.get("file")
+        if system not in VALID_SYSTEMS or not isinstance(filename, str)                 or filename != os.path.basename(filename) or filename in ("", ".", ".."):
+            return jsonify({"error": "Invalid keep/trash entry"}), 400
+        paths.append(os.path.join(_roms_root(), system, filename))
+    keep_path, trash_path_src = paths
+    if os.path.abspath(keep_path) == os.path.abspath(trash_path_src):
+        return jsonify({"error": "keep and trash are the same file"}), 400
+    if not os.path.isfile(keep_path) or not os.path.isfile(trash_path_src):
+        return jsonify({"error": "File not found"}), 404
+    if not files_identical(keep_path, trash_path_src):
+        return jsonify({"error": "Files are not byte-identical — refusing to trash"}), 409
+    try:
+        trash_path = _trash_file(trash["system"], trash["file"], trash_path_src)
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    logger.info(f"Trashed duplicate {trash['file']} from {trash['system']} (identical to {keep['system']}/{keep['file']})")
+    with _cache_lock:
+        _remove_rom_from_cache(trash["system"], trash["file"])
+        remaining = []
+        for g in scan_cache.get("duplicates", []):
+            g["copies"] = [c for c in g["copies"]
+                           if not (c["system"] == trash["system"] and c["file"] == trash["file"])]
+            if len(g["copies"]) > 1:
+                remaining.append(g)
+        scan_cache["duplicates"] = remaining
+        scan_cache["issues"] = [
+            i for i in scan_cache.get("issues", [])
+            if not (i.get("type") == "duplicate" and len(i.get("copies", [])) > 0
+                    and not any(g["hash"] == i.get("hash") for g in remaining))
+        ]
+        scan_cache["stats"] = _compute_stats()
+    return jsonify({"ok": True, "trash_path": trash_path})
 
 
 @app.route("/api/move", methods=["POST"])
