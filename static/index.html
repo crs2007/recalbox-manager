@@ -620,6 +620,8 @@ const state = {
   missingCovers: [],
   coverScraping: {},
   scrapeQueue: [],
+  scrapeStopped: null,   // {kind, error, remaining} when a bulk scrape was halted by a fatal error
+  ssQuota: null,         // latest ScreenScraper quota {used, max, remaining}
   scrapingBulk: false,
   coverSystemFilter: 'all',
   missingDescriptions: [],
@@ -1265,9 +1267,12 @@ async function scrapeCover(filename, system, gameName) {
       sega_fandom_down: 'Sega Fandom Wiki unavailable' + (r.detail ? ': ' + r.detail : ''),
       no_sources: 'No scrape sources available for this system',
     };
-    toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+    if (!(state.scrapingBulk && QUEUE_STOP_ERRORS.includes(r.error))) {
+      toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+    }
   }
   render();
+  return r;
 }
 
 async function processScrapeQueue() {
@@ -1278,13 +1283,44 @@ async function processScrapeQueue() {
     return;
   }
   state.scrapingBulk = true;
-  const { filename, system, gameName } = state.scrapeQueue.shift();
-  await scrapeCover(filename, system, gameName);
-  setTimeout(processScrapeQueue, 1200); // ~50/min — under ScreenScraper free tier limit
+  const item = state.scrapeQueue.shift();
+  const res = await scrapeCover(item.filename, item.system, item.gameName);
+  if (res && !res.ok && QUEUE_STOP_ERRORS.includes(res.error)) state.scrapeQueue.unshift(item);
+  if (queueShouldStop(res, 'cover')) return;
+  setTimeout(processScrapeQueue, scrapeDelay()); // adaptive pacing under the ScreenScraper quota
+}
+
+// Errors that will fail identically for every remaining ROM: stop the queue instead of
+// spending hundreds of doomed requests. The remaining queue is kept so it can be resumed.
+const QUEUE_STOP_ERRORS = ['rate_limited', 'no_credentials', 'no_devid'];
+function queueShouldStop(res, kind) {
+  if (res && res.ss_quota) state.ssQuota = res.ss_quota;
+  if (!res || res.ok || !QUEUE_STOP_ERRORS.includes(res.error)) return false;
+  const left = kind === 'cover' ? state.scrapeQueue.length : state.descScrapeQueue.length;
+  if (kind === 'cover') state.scrapingBulk = false; else state.descScrapingBulk = false;
+  state.scrapeStopped = { kind, error: res.error, remaining: left };
+  toast(`Bulk scrape stopped (${res.error.replace('_', ' ')}). ${left} item(s) left in the queue.`, 'error');
+  render();
+  return true;
+}
+function resumeScrapeQueue() {
+  const st = state.scrapeStopped; if (!st) return;
+  state.scrapeStopped = null;
+  if (st.kind === 'cover') processScrapeQueue(); else processScrapeDescQueue();
+}
+// ~50/min normally; back off hard when little daily quota is left.
+function scrapeDelay() {
+  const q = state.ssQuota;
+  if (q && q.remaining !== undefined) {
+    if (q.remaining < 20) return 6000;
+    if (q.remaining < 100) return 3000;
+  }
+  return 1200;
 }
 
 function startBulkScrape(roms) {
   if (state.scrapingBulk) { toast('Bulk scrape already in progress', 'info'); return; }
+  state.scrapeStopped = null;
   state.scrapeQueue = roms.map(r => ({ filename: r.name, system: r.system, gameName: r.game_name || '' }));
   processScrapeQueue();
 }
@@ -1326,9 +1362,12 @@ async function scrapeDescription(filename, system, gameName) {
       sega_fandom_down: 'Sega Fandom Wiki unavailable' + (r.detail ? ': ' + r.detail : ''),
       no_sources: 'No scrape sources available for this system',
     };
-    toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+    if (!(state.descScrapingBulk && QUEUE_STOP_ERRORS.includes(r.error))) {
+      toast(msgs[r.error] || ('Scrape failed: ' + (r.error || 'unknown')), 'error');
+    }
   }
   render();
+  return r;
 }
 
 async function processScrapeDescQueue() {
@@ -1339,9 +1378,11 @@ async function processScrapeDescQueue() {
     return;
   }
   state.descScrapingBulk = true;
-  const { filename, system, gameName } = state.descScrapeQueue.shift();
-  await scrapeDescription(filename, system, gameName);
-  setTimeout(processScrapeDescQueue, 1200);
+  const item = state.descScrapeQueue.shift();
+  const res = await scrapeDescription(item.filename, item.system, item.gameName);
+  if (res && !res.ok && QUEUE_STOP_ERRORS.includes(res.error)) state.descScrapeQueue.unshift(item);
+  if (queueShouldStop(res, 'desc')) return;
+  setTimeout(processScrapeDescQueue, scrapeDelay());
 }
 
 function startBulkScrapeDescs(roms) {
@@ -2248,9 +2289,11 @@ function renderMissingCovers() {
 
   // Store filtered roms in state so the button doesn't embed huge JSON in the HTML
   state._pendingBulkRoms = roms;
-  const bulkBtn = roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrape(state._pendingBulkRoms)" ${state.scrapingBulk ? 'disabled' : ''}>
+  const stoppedCover = state.scrapeStopped && state.scrapeStopped.kind === 'cover' && state.scrapeQueue.length;
+  const resumeBtn = stoppedCover ? `<button class="btn btn-success btn-sm" onclick="resumeScrapeQueue()">▶ Resume (${state.scrapeQueue.length} left — stopped: ${escHtml(state.scrapeStopped.error)})</button>` : '';
+  const bulkBtn = resumeBtn || (roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrape(state._pendingBulkRoms)" ${state.scrapingBulk ? 'disabled' : ''}>
     ${state.scrapingBulk ? `⟳ Scraping (${state.scrapeQueue.length} left)...` : `🖼 Scrape All Missing (${roms.length})`}
-  </button>` : '';
+  </button>` : '');
 
   const refreshBtn = `<button class="btn btn-sm" onclick="loadMissingCovers()">↻ Refresh</button>`;
 
@@ -2311,9 +2354,11 @@ function renderMissingDescriptions() {
   </select>`;
 
   state._pendingBulkDescRoms = roms;
-  const bulkBtn = roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrapeDescs(state._pendingBulkDescRoms)" ${state.descScrapingBulk ? 'disabled' : ''}>
+  const stoppedDesc = state.scrapeStopped && state.scrapeStopped.kind === 'desc' && state.descScrapeQueue.length;
+  const resumeDescBtn = stoppedDesc ? `<button class="btn btn-success btn-sm" onclick="resumeScrapeQueue()">▶ Resume (${state.descScrapeQueue.length} left — stopped: ${escHtml(state.scrapeStopped.error)})</button>` : '';
+  const bulkBtn = resumeDescBtn || (roms.length > 0 ? `<button class="btn btn-primary btn-sm" onclick="startBulkScrapeDescs(state._pendingBulkDescRoms)" ${state.descScrapingBulk ? 'disabled' : ''}>
     ${state.descScrapingBulk ? `⟳ Scraping (${state.descScrapeQueue.length} left)...` : `📝 Scrape All Missing (${roms.length})`}
-  </button>` : '';
+  </button>` : '');
 
   const refreshBtn = `<button class="btn btn-sm" onclick="loadMissingDescriptions()">↻ Refresh</button>`;
 

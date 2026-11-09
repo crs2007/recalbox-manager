@@ -23,6 +23,7 @@ import mimetypes
 import socket
 import ipaddress
 import threading
+import time
 import configparser
 import xml.etree.ElementTree as ET
 import http.client
@@ -127,7 +128,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.15"
+APP_VERSION = "2026.07.16"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -3185,21 +3186,41 @@ def repair_gamelist():
     })
 
 
-def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
-    """
-    Fetch cover art from ScreenScraper.fr for one ROM.
-    Returns {ok, image_path?, cover_url?, error?}.
-    Never raises — all errors returned in dict.
-    """
+# ScreenScraper quota seen on the most recent response, and a short-lived cache of jeuInfos
+# results. Cover and description scrapes of the same ROM share ONE SS request (the daily quota
+# is per request), and a not_found is cached too so the second pass doesn't spend quota again.
+_ss_quota: dict = {}
+_ss_cache: "collections.OrderedDict[tuple, tuple]" = _collections.OrderedDict()
+_ss_cache_lock = threading.Lock()
+_SS_CACHE_TTL = 3600
+_SS_CACHE_MAX = 3000
+
+
+def _ss_quota_snapshot() -> dict:
+    with _ss_cache_lock:
+        return dict(_ss_quota)
+
+
+def _ss_fetch_jeu(system_key, rom_filename, game_name=""):
+    """Call ScreenScraper jeuInfos once and return {ok: True, jeu} or an error dict.
+
+    Shared by the cover and description fetchers. Never raises."""
     if not ss_config.get("screenscraper_user") or not ss_config.get("screenscraper_pass"):
         return {"ok": False, "error": "no_credentials"}
-
     if not ss_config.get("screenscraper_devid") or not ss_config.get("screenscraper_devpass"):
         return {"ok": False, "error": "no_devid"}
-
     system_id = SCREENSCRAPER_SYSTEM_IDS.get(system_key.lower())
     if not system_id:
         return {"ok": False, "error": "unsupported_system"}
+
+    search_term = game_name or _clean_rom_name(rom_filename)
+    cache_key = (system_id, rom_filename, search_term)
+    now = time.time()
+    with _ss_cache_lock:
+        hit = _ss_cache.get(cache_key)
+        if hit and now - hit[0] < _SS_CACHE_TTL:
+            _ss_cache.move_to_end(cache_key)
+            return hit[1]
 
     params = {
         "devid": ss_config["screenscraper_devid"],
@@ -3211,7 +3232,6 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
         "systemeid": system_id,
         "romnom": rom_filename,
     }
-    search_term = game_name or _clean_rom_name(rom_filename)
     if search_term:
         params["romrecherche"] = search_term  # text search field (keeps romnom for hash matching)
 
@@ -3227,7 +3247,9 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
         if e.code == 403:
             return {"ok": False, "error": "no_devid", "detail": "HTTP 403 — developer credentials rejected or missing"}
         if e.code == 404:
-            return {"ok": False, "error": "not_found"}
+            result = {"ok": False, "error": "not_found"}
+            _ss_cache_put(cache_key, result)
+            return result
         return {"ok": False, "error": "ss_down", "detail": f"HTTP {e.code}: {e.reason}"}
     except urllib.error.URLError as e:
         if "timed out" in str(e).lower():
@@ -3241,21 +3263,58 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return {"ok": False, "error": "not_found"}
+        # SS answers quota/maintenance problems with a plain-text body and HTTP 200.
+        low = raw[:200].lower()
+        if "maximum" in low or "quota" in low or "limit" in low:
+            return {"ok": False, "error": "rate_limited"}
+        result = {"ok": False, "error": "not_found"}
+        _ss_cache_put(cache_key, result)
+        return result
 
-    # Check for rate limit in response body
     ssuser = data.get("response", {}).get("ssuser", {})
     try:
-        if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
-            if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
+        used, cap = int(ssuser.get("requeststoday", 0)), int(ssuser.get("maxrequestsperday", 0))
+        if cap:
+            with _ss_cache_lock:
+                _ss_quota.update({"used": used, "max": cap, "remaining": max(0, cap - used)})
+            if used >= cap:
                 return {"ok": False, "error": "rate_limited"}
     except (TypeError, ValueError):
         pass  # non-numeric quota fields — ignore, the request itself succeeded
 
-    # Navigate to media list
     jeu = data.get("response", {}).get("jeu")
     if not jeu:
-        return {"ok": False, "error": "not_found"}
+        result = {"ok": False, "error": "not_found"}
+    else:
+        # Keep only what the fetchers use, so a big cache stays small.
+        slim = {
+            "medias": [{"type": m.get("type"), "region": m.get("region", ""), "url": m.get("url")}
+                       for m in jeu.get("medias", [])],
+            "synopsis": [{"langue": e.get("langue"), "text": e.get("text")} for e in jeu.get("synopsis", [])],
+        }
+        result = {"ok": True, "jeu": slim}
+    _ss_cache_put(cache_key, result)
+    return result
+
+
+def _ss_cache_put(key, result) -> None:
+    with _ss_cache_lock:
+        _ss_cache[key] = (time.time(), result)
+        _ss_cache.move_to_end(key)
+        while len(_ss_cache) > _SS_CACHE_MAX:
+            _ss_cache.popitem(last=False)
+
+
+def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
+    """
+    Fetch cover art from ScreenScraper.fr for one ROM.
+    Returns {ok, image_path?, cover_url?, error?}.
+    Never raises — all errors returned in dict.
+    """
+    res = _ss_fetch_jeu(system_key, rom_filename, game_name)
+    if not res["ok"]:
+        return res
+    jeu = res["jeu"]
 
     medias = jeu.get("medias", [])
     if not medias:
@@ -3367,69 +3426,10 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
     Returns {ok, desc?, error?}.
     Never raises — all errors returned in dict.
     """
-    if not ss_config.get("screenscraper_user") or not ss_config.get("screenscraper_pass"):
-        return {"ok": False, "error": "no_credentials"}
-
-    if not ss_config.get("screenscraper_devid") or not ss_config.get("screenscraper_devpass"):
-        return {"ok": False, "error": "no_devid"}
-
-    system_id = SCREENSCRAPER_SYSTEM_IDS.get(system_key.lower())
-    if not system_id:
-        return {"ok": False, "error": "unsupported_system"}
-
-    params = {
-        "devid": ss_config["screenscraper_devid"],
-        "devpassword": ss_config["screenscraper_devpass"],
-        "softname": "recalbox-manager",
-        "output": "json",
-        "ssid": ss_config["screenscraper_user"],
-        "sspassword": ss_config["screenscraper_pass"],
-        "systemeid": system_id,
-        "romnom": rom_filename,
-    }
-    search_term = game_name or _clean_rom_name(rom_filename)
-    if search_term:
-        params["romrecherche"] = search_term
-
-    url = "https://www.screenscraper.fr/api2/jeuInfos.php?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
-
-    try:
-        with _public_urlopen(req, timeout=15) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (429, 430):
-            return {"ok": False, "error": "rate_limited"}
-        if e.code == 403:
-            return {"ok": False, "error": "no_devid", "detail": "HTTP 403 — developer credentials rejected or missing"}
-        if e.code == 404:
-            return {"ok": False, "error": "not_found"}
-        return {"ok": False, "error": "ss_down", "detail": f"HTTP {e.code}: {e.reason}"}
-    except urllib.error.URLError as e:
-        if "timed out" in str(e).lower():
-            return {"ok": False, "error": "timeout"}
-        return {"ok": False, "error": "ss_down", "detail": str(e)}
-    except (TimeoutError, socket.timeout):
-        return {"ok": False, "error": "timeout"}
-    except OSError as e:
-        return {"ok": False, "error": "ss_down", "detail": str(e)}
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "not_found"}
-
-    ssuser = data.get("response", {}).get("ssuser", {})
-    try:
-        if ssuser.get("requeststoday") and ssuser.get("maxrequestsperday"):
-            if int(ssuser.get("requeststoday", 0)) >= int(ssuser.get("maxrequestsperday", 1)):
-                return {"ok": False, "error": "rate_limited"}
-    except (TypeError, ValueError):
-        pass
-
-    jeu = data.get("response", {}).get("jeu")
-    if not jeu:
-        return {"ok": False, "error": "not_found"}
+    res = _ss_fetch_jeu(system_key, rom_filename, game_name)
+    if not res["ok"]:
+        return res
+    jeu = res["jeu"]
 
     desc = _extract_synopsis(jeu)
     if not desc:
@@ -3816,17 +3816,25 @@ def _run_fallback_chain(scrape_type, system_key, rom_filename, game_name=""):
 
         if result["ok"]:
             logger.info(f"[{source['name']}] Success for {rom_filename}")
-            return result
+            return _with_quota(result)
 
         last_result = result
         if result.get("error") not in FALLBACK_ERRORS:
             # Transient error (rate_limit, timeout, down) — don't try more sources
             logger.warning(f"[{source['name']}] Non-fallback error for {rom_filename}: {result.get('error')}")
-            return result
+            return _with_quota(result)
 
         logger.info(f"[{source['name']}] miss ({result.get('error')}) for {rom_filename}, trying next...")
 
-    return last_result
+    return _with_quota(last_result)
+
+
+def _with_quota(result: dict) -> dict:
+    """Attach the latest ScreenScraper quota (if known) so the UI can pace itself."""
+    q = _ss_quota_snapshot()
+    if q:
+        result = dict(result, ss_quota=q)
+    return result
 
 
 @app.route("/api/covers/scrape", methods=["POST"])

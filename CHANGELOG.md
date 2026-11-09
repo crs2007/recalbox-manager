@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.16 — 2026-11-09
+### Fixed
+- **Bulk scrape ignored rate-limit / credential errors and spent ScreenScraper quota twice per ROM** (#16) — the queue now stops on `rate_limited`, `no_credentials` and `no_devid` with a single toast, keeps the remaining items (the failed one stays at the head) and offers a **Resume** button instead of firing thousands of doomed requests and error toasts. The cover and description fetchers now share one cached `jeuInfos` call per ROM (`_ss_fetch_jeu`, 1 h TTL, not-found results cached too), halving quota use when both are scraped. The latest `requeststoday` / `maxrequestsperday` is returned as `ss_quota` on scrape responses and the queue slows down (3 s / 6 s) when little daily quota remains. SS plain-text quota messages (HTTP 200) are now recognised as `rate_limited`.
+
 ## v2026.07.15 — 2026-11-09
 ### Fixed
 - **Fallback scrapers wrote the first wiki search hit with no relevance check** (#15) — Sega Fandom (cover + description) and Bootleg Games Wiki now fetch up to 5 `opensearch` results and only accept a title that matches the game after normalization (case, region/revision tags, punctuation, "Name, The" ordering) with an exact match or `difflib` ratio ≥ 0.85; otherwise `not_found` and the chain moves on. Bootleg Games Wiki is limited to the platforms that actually have bootlegs (`nes`, `famicom`, `megadrive`, `gb`, `gbc`, `snes`) instead of all systems.
