@@ -129,7 +129,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.22"
+APP_VERSION = "2026.07.23"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -278,6 +278,7 @@ IGNORED_EXTENSIONS = {
     ".htm", ".html", ".pdf",                  # documentation
     ".jpg", ".jpeg", ".png", ".gif", ".bmp",  # box art / screenshots
     ".xml", ".backup", ".bak", ".log",        # EmulationStation / Recalbox system files
+    ".part", ".tmp",                          # interrupted downloads / atomic-write temp files
 }
 
 # Human-friendly system names
@@ -1329,6 +1330,12 @@ def run_rom_diagnostics(
     return diag_issues
 
 
+def _gl_lookup(gl: dict, filename: str):
+    """Gamelist entry for a ROM: exact basename first, stem as a fallback."""
+    base = os.path.basename(filename).lower()
+    return gl.get(base) or gl.get(os.path.splitext(base)[0])
+
+
 def _strip_dot_slash(p: str) -> str:
     """Drop a leading "./" (or ".\\") PREFIX from a gamelist path. Unlike str.lstrip("./") this
     removes the prefix, not any run of '.' and '/' characters, so ".hack//G.U..." or
@@ -1441,7 +1448,7 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
                 image_abs
                 and os.path.basename(image_abs) in dir_listings.get(os.path.dirname(image_abs), ())
             )
-            result[stem] = {
+            entry = {
                 "path": basename,
                 "name": game_name,
                 "image": image_rel,
@@ -1450,6 +1457,10 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
                 "thumbnail": thumbnail_rel,
                 "desc": game_desc,
             }
+            # Keyed by the full lower-cased basename (exact: Game.cue vs Game.m3u vs Game.zip
+            # are different entries) AND by stem as a fallback for callers that only know it.
+            result[basename.lower()] = entry
+            result.setdefault(stem, entry)
     except (ET.ParseError, OSError):
         pass
     return result
@@ -1614,7 +1625,7 @@ def _scan_inventory() -> dict:
                 "error": gl_info.get("error") or "parse failed",
                 "recoverable": gl_info.get("recoverable", False),
                 "repair_kind": gl_info.get("repair_kind"),
-                "recovered_entries": len(gamelist),
+                "recovered_entries": len({id(e) for e in gamelist.values()}),
             })
 
         try:
@@ -1638,8 +1649,7 @@ def _scan_inventory() -> dict:
                     suggested = list(EXTENSION_TO_SYSTEMS.get(ext, set()) - {system_key})
 
                     # Look up gamelist entry for cover/metadata
-                    stem = os.path.splitext(entry.name)[0].lower()
-                    gl_entry = gamelist.get(stem)
+                    gl_entry = _gl_lookup(gamelist, entry.name)
 
                     rom_info = {
                         "name": entry.name,
@@ -2053,6 +2063,12 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+def _ss_configured() -> bool:
+    """True only when all four ScreenScraper credential fields are set."""
+    return all(ss_config.get(k) for k in (
+        "screenscraper_user", "screenscraper_pass", "screenscraper_devid", "screenscraper_devpass"))
+
+
 @app.route("/api/config", methods=["GET"])
 def get_config():
     """Return current configuration."""
@@ -2064,10 +2080,7 @@ def get_config():
         "py7zr_available": PY7ZR_AVAILABLE,
         "screenscraper_user": ss_config.get("screenscraper_user", ""),
         "screenscraper_devid": ss_config.get("screenscraper_devid", ""),
-        "screenscraper_configured": bool(
-            ss_config.get("screenscraper_user") and ss_config.get("screenscraper_pass")
-            and ss_config.get("screenscraper_devid") and ss_config.get("screenscraper_devpass")
-        ),
+        "screenscraper_configured": _ss_configured(),
     })
 
 
@@ -2130,7 +2143,7 @@ def set_config():
         "ok": True,
         "roms_root": _roms_root(),
         "accessible": os.path.exists(_roms_root()),
-        "screenscraper_configured": bool(ss_config["screenscraper_user"] and ss_config["screenscraper_pass"]),
+        "screenscraper_configured": _ss_configured(),
     })
 
 
@@ -2437,7 +2450,7 @@ def _move_rom_metadata_inner(src_system: str, dst_system: str, filename: str) ->
         gls = scan_cache.setdefault("gamelists", {})
         gls[src_system], gls[dst_system] = gl_src, gl_dst
         sys_info = scan_cache.get("systems", {}).get(dst_system)
-        gl_entry = gl_dst.get(os.path.splitext(filename)[0].lower())
+        gl_entry = _gl_lookup(gl_dst, filename)
         if sys_info and gl_entry:
             for rom in sys_info.get("roms", []):
                 if rom.get("name") == filename:
@@ -3297,7 +3310,9 @@ def serve_cover_image(system_name, filename):
             mimetype, _ = mimetypes.guess_type(filename)
             mimetype = mimetype or "image/png"
             response = send_file(img_path, mimetype=mimetype)
-            response.headers["Cache-Control"] = "public, max-age=3600"
+            # Revalidate every time (cheap 304 via ETag/Last-Modified): a re-scrape that
+            # rewrites the same filename must show up immediately, not after an hour.
+            response.headers["Cache-Control"] = "no-cache"
             return response
 
     return jsonify({"error": "Image not found"}), 404
@@ -3449,8 +3464,8 @@ def _gl_cache_update(system_dir: str, rom_filename: str, fields: dict) -> None:
     stem = os.path.splitext(base)[0].lower()
     with _cache_lock:
         gl = scan_cache.setdefault("gamelists", {}).setdefault(system_dir, {})
-        e = gl.get(stem) or {"path": base, "name": "", "image": None, "image_abs": None,
-                             "image_exists": False, "thumbnail": None, "desc": ""}
+        e = gl.get(base.lower()) or {"path": base, "name": "", "image": None, "image_abs": None,
+                                     "image_exists": False, "thumbnail": None, "desc": ""}
         for key in ("name", "thumbnail", "desc"):
             if fields.get(key) is not None:
                 e[key] = str(fields[key])
@@ -3462,7 +3477,8 @@ def _gl_cache_update(system_dir: str, rom_filename: str, fields: dict) -> None:
                 e["image_exists"] = os.path.isfile(e["image_abs"])
             else:
                 e["image_abs"], e["image_exists"] = None, False
-        gl[stem] = e
+        gl[base.lower()] = e
+        gl.setdefault(stem, e)
 
 
 def write_gamelist_entry(system_dir, rom_filename, fields, defer=False):
@@ -3662,7 +3678,7 @@ def _repair_gamelist_locked(system):
 # results. Cover and description scrapes of the same ROM share ONE SS request (the daily quota
 # is per request), and a not_found is cached too so the second pass doesn't spend quota again.
 _ss_quota: dict = {}
-_ss_cache: "collections.OrderedDict[tuple, tuple]" = _collections.OrderedDict()
+_ss_cache: "_collections.OrderedDict[tuple, tuple]" = _collections.OrderedDict()
 _ss_cache_lock = threading.Lock()
 _SS_CACHE_TTL = 3600
 _SS_CACHE_MAX = 3000
@@ -4336,7 +4352,7 @@ def scrape_cover():
     # Get existing game_name from gamelist if not provided
     if not game_name:
         gl = scan_cache.get("gamelists", {}).get(system, {})
-        gl_entry = gl.get(rom_stem.lower())
+        gl_entry = _gl_lookup(gl, filename)
         if gl_entry:
             game_name = gl_entry.get("name", "")
 
@@ -4374,7 +4390,7 @@ def scrape_description():
     rom_stem = os.path.splitext(filename)[0]
     if not game_name:
         gl = scan_cache.get("gamelists", {}).get(system, {})
-        gl_entry = gl.get(rom_stem.lower())
+        gl_entry = _gl_lookup(gl, filename)
         if gl_entry:
             game_name = gl_entry.get("name", "")
 
@@ -4447,7 +4463,7 @@ def download_cover_from_url():
     # Get existing game_name from gamelist if available
     rom_stem = os.path.splitext(img_filename)[0]
     gl = scan_cache.get("gamelists", {}).get(system, {})
-    gl_entry = gl.get(rom_stem.lower())
+    gl_entry = _gl_lookup(gl, filename)
     game_name = gl_entry.get("name", "") if gl_entry else ""
 
     write_result = write_gamelist_entry(system, filename, {
@@ -4469,7 +4485,7 @@ def download_cover_from_url():
 CATALOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog")
 
 # Lazy in-memory cache: system_key -> parsed catalog dict (or None if no/invalid file).
-_catalog_cache: dict[str, dict | None] = {}
+_catalog_cache: dict[str, tuple] = {}   # system -> (mtime_ns, catalog | None)
 
 # Downloads may only come from archive.org (catalog URLs are produced by our build script).
 # urlopen transparently follows archive.org's redirect to a public ia*.us.archive.org node.
@@ -4486,11 +4502,40 @@ def _is_archive_org_url(url: str) -> bool:
 _MAX_ROM_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
+_downloads_in_progress: set = set()
+_downloads_lock = threading.Lock()
+
+
+def _cleanup_stale_parts() -> None:
+    """Delete <rom>.part files left by a download interrupted by a crash/kill. Runs once in a
+    background thread at startup (nothing can be downloading yet)."""
+    try:
+        root = _roms_root()
+        for d in os.listdir(root):
+            sysdir = os.path.join(root, d)
+            if not os.path.isdir(sysdir) or d.startswith((".", "_")):
+                continue
+            for e in os.scandir(sysdir):
+                if e.is_file() and e.name.endswith(".part"):
+                    try:
+                        os.remove(e.path)
+                        logger.info(f"Removed stale partial download {e.path}")
+                    except OSError:
+                        pass
+    except OSError:
+        pass  # share not reachable yet — nothing to clean
+
+
 def _load_catalog(system_key: str) -> dict | None:
     """Load and cache catalog/<system>.json. Returns None if absent or unparseable."""
-    if system_key in _catalog_cache:
-        return _catalog_cache[system_key]
     path = os.path.join(CATALOG_DIR, f"{system_key}.json")
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        mtime = None
+    cached = _catalog_cache.get(system_key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]          # re-running tools/build_catalog.py is picked up without a restart
     catalog = None
     if os.path.exists(path):
         try:
@@ -4499,7 +4544,7 @@ def _load_catalog(system_key: str) -> dict | None:
         except (OSError, ValueError) as e:
             logger.warning(f"Failed to load catalog {path}: {e}")
             catalog = None
-    _catalog_cache[system_key] = catalog
+    _catalog_cache[system_key] = (mtime, catalog)
     return catalog
 
 
@@ -4621,13 +4666,28 @@ def catalog_download():
     except OSError as e:
         return jsonify({"ok": False, "error": "mkdir_failed", "detail": str(e)}), 500
 
-    # Stream to a temp file, then atomic-rename. Cap total bytes.
+    # Stream to a temp file, then atomic-rename. Cap total bytes. Two requests for the same
+    # file must not share one .part: claim the destination first, and open the temp file
+    # exclusively ("xb") as a second line of defence.
     tmp_path = dst_path + ".part"
+    with _downloads_lock:
+        if dst_path in _downloads_in_progress:
+            return jsonify({"ok": False, "error": "download_in_progress",
+                            "detail": f"{filename} is already being downloaded"}), 409
+        _downloads_in_progress.add(dst_path)
+    try:
+        return _catalog_download_locked(system, filename, game, url, dst_path, tmp_path)
+    finally:
+        with _downloads_lock:
+            _downloads_in_progress.discard(dst_path)
+
+
+def _catalog_download_locked(system, filename, game, url, dst_path, tmp_path):
     req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
         with _public_urlopen(req, timeout=60, host_ok=_is_archive_org_url) as resp:
             written = 0
-            with open(tmp_path, "wb") as f:
+            with open(tmp_path, "xb") as f:
                 while True:
                     chunk = resp.read(1 << 16)
                     if not chunk:
@@ -4636,6 +4696,9 @@ def catalog_download():
                     if written > _MAX_ROM_BYTES:
                         raise ValueError(f"download exceeds {_MAX_ROM_BYTES} byte cap")
                     f.write(chunk)
+    except FileExistsError:
+        return jsonify({"ok": False, "error": "download_in_progress",
+                        "detail": "A partial download of this file already exists"}), 409
     except Exception as e:  # noqa: BLE001 — clean up partial file on any failure
         try:
             os.remove(tmp_path)
@@ -4733,6 +4796,7 @@ if __name__ == "__main__":
     logger.info(f"Recalbox share path: {_config['share']}")
     logger.info(f"ROMs root: {_roms_root()}")
     _load_probe_cache()
+    threading.Thread(target=_cleanup_stale_parts, daemon=True).start()
     if not PY7ZR_AVAILABLE:
         logger.warning(
             "py7zr is NOT installed — .7z archives cannot be inspected. "

@@ -670,7 +670,7 @@ const state = {
 async function api(path, opts = {}) {
   try {
     const r = await fetch(API + path, {
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'recalbox-manager' },
+      headers: { ...(opts.body ? { 'Content-Type': 'application/json' } : {}), 'X-Requested-With': 'recalbox-manager' },
       ...opts,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
@@ -2761,7 +2761,9 @@ function renderBrowse() {
           const sys = state.systems[key];
           const tmpDiv = document.createElement('div');
           tmpDiv.innerHTML = renderBrowseRow(key, sys);
-          rowEl.replaceWith(tmpDiv.firstElementChild);
+          // renderBrowseRow returns '' when the filter leaves the row empty: drop the row
+          // instead of inserting the text "null".
+          if (tmpDiv.firstElementChild) rowEl.replaceWith(tmpDiv.firstElementChild); else rowEl.remove();
           bindBrowseScrollButtons();
         }
       });

@@ -2,6 +2,16 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.23 — 2026-11-09
+### Fixed
+- **Smaller correctness gaps** (#23):
+  - `.part` / `.tmp` files are ignored by the scanner (no more "misplaced ROM" for an interrupted download), stale `.part` files are deleted by a background task at startup, and two concurrent downloads of the same catalog file can no longer share one `.part` (per-destination claim + exclusive `"xb"` open → 409 `download_in_progress`).
+  - The catalog cache is keyed on the file's mtime, so re-running `tools/build_catalog.py` is picked up without a restart.
+  - Covers are served with `Cache-Control: no-cache` (ETag/Last-Modified revalidation) instead of `max-age=3600`, so a re-scrape that rewrites the same filename shows immediately.
+  - `parse_gamelist` keys entries by full basename (with the stem kept as a fallback via `_gl_lookup()`), so `Game.cue`/`Game.m3u` or `Game.zip`/`Game.7z` no longer overwrite each other.
+  - `/api/config` GET and POST share one `_ss_configured()` helper (all four credentials).
+  - `api()` sends `Content-Type` only when there is a body; Browse no longer inserts the text "null" when a filter empties a row.
+
 ## v2026.07.22 — 2026-11-09
 ### Performance
 - **Deep scan read files one at a time over SMB and kept nothing between runs** (#22) — the content diagnostics (overdump tail, ZIP integrity + listing, NES magic) now run through `_probe_roms()`: a thread pool (`RECALBOX_PROBE_WORKERS`, default 8), one `open()` per file for everything it needs, and one `ZipFile` handle shared by the integrity and contents checks (the old `is_zipfile` + second open is gone). Duplicate-candidate quick/full hashes are parallel too. Results are cached by `(size, mtime_ns)` per file, in memory and in `scan_cache.json` (gitignored; set `RECALBOX_PROBE_CACHE=off` to disable or point it elsewhere), so a rescan or restart only re-reads files that changed.
