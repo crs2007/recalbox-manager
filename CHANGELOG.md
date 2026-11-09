@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.13 — 2026-11-09
+### Security
+- **SSRF guard could be bypassed with redirects or DNS rebinding** (#13) — all outbound fetches now go through `_public_urlopen()`: it resolves the host once, rejects non-public addresses, and connects to that exact IP (pinned, with correct SNI/Host), and every redirect hop is re-validated (http/https only, max 3 hops; catalog downloads may only be redirected within `archive.org`). Environment proxy settings are ignored for these fetches.
+
 ## v2026.07.12 — 2026-11-09
 ### Security
 - **Stored XSS through game names, filenames and folder names** (#12) — `escJs()` only escaped for a JS string, but its output lives in HTML attributes, so a `"` still ended the attribute. It now JS-escapes *then* HTML-escapes, and a new `escAttrJson()` fully escapes the JSON passed to the edit/move modals (previously a `&quot;` in a name could decode back into a quote and break out). Raw `s.folder` / `r.system` / `m.system` / browse `key` interpolations in handlers, `data-*` attributes and text are now escaped. A Content-Security-Policy (no remote scripts, `connect-src 'self'`, `frame-ancestors 'none'`) and `X-Content-Type-Options: nosniff` are sent on every response; `script-src` keeps `'unsafe-inline'` until the inline handlers are replaced by delegated listeners.

@@ -25,6 +25,7 @@ import ipaddress
 import threading
 import configparser
 import xml.etree.ElementTree as ET
+import http.client
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -119,7 +120,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.12"
+APP_VERSION = "2026.07.13"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1775,6 +1776,75 @@ def _url_host_is_public(url: str) -> bool:
     return True
 
 
+# ─── SSRF-safe outbound HTTP ──────────────────────────────────────────────────
+# Every outbound fetch goes through _public_urlopen(). It (a) resolves the hostname itself,
+# refuses non-public addresses, and connects to that exact IP (no second DNS lookup, so DNS
+# rebinding can't swap in a private address), and (b) re-validates every redirect hop
+# (scheme, optional host allowlist, max 3 hops). Env proxies are deliberately ignored.
+
+def _resolve_public(host: str) -> str:
+    """Resolve host and return one address, raising OSError if any result is non-public."""
+    infos = socket.getaddrinfo(host, None)
+    if not infos:
+        raise OSError(f"cannot resolve {host}")
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            raise OSError(f"blocked non-public address {addr} for {host}")
+    return infos[0][4][0]
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        ip = _resolve_public(self.host)
+        self.sock = socket.create_connection((ip, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        ip = _resolve_public(self.host)
+        sock = socket.create_connection((ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req)
+
+
+class _CheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    max_redirections = 3
+
+    def __init__(self, host_ok=None):
+        self._host_ok = host_ok
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlparse(newurl).scheme not in ("http", "https"):
+            raise urllib.error.HTTPError(newurl, code, "redirect to non-http(s) URL blocked", headers, fp)
+        if self._host_ok and not self._host_ok(newurl):
+            raise urllib.error.HTTPError(newurl, code, "redirect to a disallowed host blocked", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _public_urlopen(url_or_req, timeout=None, host_ok=None):
+    """urlopen() replacement that only ever talks to public addresses (see block comment)."""
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _PinnedHTTPHandler(),
+        _PinnedHTTPSHandler(),
+        _CheckedRedirectHandler(host_ok),
+    )
+    kwargs = {} if timeout is None else {"timeout": timeout}
+    return opener.open(url_or_req, **kwargs)
+
+
+
 def _version_tuple(v: str) -> tuple[int, ...]:
     """Parse a CalVer string like '2026.04.23' into a comparable int tuple.
 
@@ -2758,7 +2828,7 @@ def version_check():
         "Accept": "application/vnd.github+json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with _public_urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
         logger.warning(f"Version check failed: {e}")
@@ -3105,7 +3175,7 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _public_urlopen(req, timeout=15) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code in (429, 430):
@@ -3172,7 +3242,7 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
 
     # Download image
     try:
-        with urllib.request.urlopen(img_url, timeout=15) as img_resp:
+        with _public_urlopen(img_url, timeout=15) as img_resp:
             img_data = _read_capped(img_resp)
     except urllib.error.HTTPError as e:
         if e.code in (429, 430):
@@ -3219,7 +3289,7 @@ def fetch_libretro_cover(system_key, rom_filename, game_name=""):
 
     req = urllib.request.Request(img_url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _public_urlopen(req, timeout=10) as resp:
             img_data = _read_capped(resp)
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -3281,7 +3351,7 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
     req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _public_urlopen(req, timeout=15) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code in (429, 430):
@@ -3349,7 +3419,7 @@ def fetch_bootleggames_description(rom_filename, game_name=""):
         })
     )
     try:
-        with urllib.request.urlopen(
+        with _public_urlopen(
             urllib.request.Request(search_url, headers=ua), timeout=10
         ) as resp:
             search_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3376,7 +3446,7 @@ def fetch_bootleggames_description(rom_filename, game_name=""):
         })
     )
     try:
-        with urllib.request.urlopen(
+        with _public_urlopen(
             urllib.request.Request(extract_url, headers=ua), timeout=10
         ) as resp:
             extract_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3419,7 +3489,7 @@ def _sega_fandom_search(search_name):
             "format": "json",
         })
     )
-    with urllib.request.urlopen(
+    with _public_urlopen(
         urllib.request.Request(search_url, headers=ua), timeout=10
     ) as resp:
         search_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3462,7 +3532,7 @@ def fetch_sega_fandom_description(rom_filename, game_name=""):
         })
     )
     try:
-        with urllib.request.urlopen(
+        with _public_urlopen(
             urllib.request.Request(extract_url, headers=ua), timeout=10
         ) as resp:
             extract_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3519,7 +3589,7 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
         })
     )
     try:
-        with urllib.request.urlopen(
+        with _public_urlopen(
             urllib.request.Request(pi_url, headers=ua), timeout=10
         ) as resp:
             pi_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3543,7 +3613,7 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
             })
         )
         try:
-            with urllib.request.urlopen(
+            with _public_urlopen(
                 urllib.request.Request(parse_url, headers=ua), timeout=10
             ) as resp:
                 parse_data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -3563,7 +3633,7 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
 
     # Step 4: download the image
     try:
-        with urllib.request.urlopen(
+        with _public_urlopen(
             urllib.request.Request(img_url, headers=ua), timeout=15
         ) as resp:
             img_data = _read_capped(resp)
@@ -3789,7 +3859,7 @@ def download_cover_from_url():
     MAX_SIZE = 10 * 1024 * 1024
     req = urllib.request.Request(image_url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _public_urlopen(req, timeout=15) as resp:
             img_data = resp.read(MAX_SIZE + 1)
             if len(img_data) > MAX_SIZE:
                 return jsonify({"ok": False, "error": "too_large", "detail": "Image exceeds 10MB limit"})
@@ -3991,7 +4061,7 @@ def catalog_download():
     tmp_path = dst_path + ".part"
     req = urllib.request.Request(url, headers={"User-Agent": f"recalbox-manager/{APP_VERSION}"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _public_urlopen(req, timeout=60, host_ok=_is_archive_org_url) as resp:
             written = 0
             with open(tmp_path, "wb") as f:
                 while True:
