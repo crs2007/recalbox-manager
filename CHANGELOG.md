@@ -2,6 +2,11 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.8 — 2026-11-09
+### Fixed
+- **Read endpoints raced the background scan** (#8) — `/api/status`, `/api/systems`, `/api/systems/<name>`, `/api/issues`, `/api/duplicates`, `/api/search`, `/api/diagnostics`, the diagnostics snapshot, missing covers/descriptions, bug reports and the catalog "owned" check now read `scan_cache` under `_cache_lock`, so they can no longer hit `dictionary changed size during iteration` or serve half-written data. The deep scan runs diagnostics on private copies of the ROM dicts and swaps a fresh system entry in under the lock (copy-on-write) instead of mutating committed entries. `_remove_diag_from_cache` now takes the lock too.
+- gamelist.xml writes now use their own `_gamelist_lock`, so readers are never queued behind slow SMB writes.
+
 ## v2026.07.7 — 2026-11-09
 ### Fixed
 - **`scan_cache` drifted out of sync after delete / move / download** (#7) — new lock-taking helpers `_cache_remove_rom`, `_cache_add_rom` and `_cache_move_rom` update ROM lists, every per-system counter (misplaced/ok/cover/description/diagnostic), issues, diagnostics and duplicate groups, then refresh stats via `_compute_stats()`. `/api/delete` now updates the cache (trashed ROMs no longer reappear), a moved ROM now shows up in its destination system, trashed-duplicate branches and catalog downloads use the same helpers, and gamelist cache/repair updates run under `_cache_lock`. The old hand-written decrement code is gone.

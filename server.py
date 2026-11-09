@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.7"
+APP_VERSION = "2026.07.8"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -644,6 +644,9 @@ scan_cache = {
 # the same system — would otherwise corrupt state or lose updates. Reentrant so a holder can
 # call other guarded helpers.
 _cache_lock = threading.RLock()
+# Serializes gamelist.xml read-modify-write (slow SMB I/O). Deliberately separate from
+# _cache_lock so API readers of scan_cache are never stuck behind a gamelist write.
+_gamelist_lock = threading.RLock()
 
 # ─── Scan Progress ──────────────────────────────────────────────────────────────
 # Live progress for the two-phase background scan, polled by the frontend via
@@ -1530,13 +1533,27 @@ def _scan_deep() -> None:
             continue
         system_key = system_dir.lower()
         system_path = os.path.join(_roms_root(), system_dir)
-        roms = sys_info["roms"]
+        # Copy-on-write: diagnostics run on private copies of the ROM dicts (the committed
+        # ones are being served to API readers), then the results are merged into a fresh
+        # system entry under the lock. Files removed/added meanwhile are respected.
+        with _cache_lock:
+            roms = [dict(r, diagnostics=list(r.get("diagnostics", []))) for r in sys_info["roms"]]
         all_names = {r["name"] for r in roms}
         diag_issues = run_rom_diagnostics(system_key, system_path, roms, all_names=all_names)
+        diag_by_name = {r["name"]: r["diagnostics"] for r in roms}
         with _cache_lock:
-            sys_info["diagnostic_count"] = len(diag_issues)
-            sys_info["diagnostic_issues"] = diag_issues
-            sys_info["deep_pending"] = False
+            current = scan_cache.get("systems", {}).get(system_dir)
+            if current is not None:
+                new_entry = dict(current)
+                new_entry["roms"] = [
+                    dict(r, diagnostics=diag_by_name.get(r["name"], r.get("diagnostics", [])))
+                    for r in current["roms"]
+                ]
+                present = {r["name"] for r in new_entry["roms"]}
+                new_entry["diagnostic_issues"] = [d for d in diag_issues if d.get("file") in present]
+                new_entry["diagnostic_count"] = len(new_entry["diagnostic_issues"])
+                new_entry["deep_pending"] = False
+                scan_cache["systems"][system_dir] = new_entry
             scan_cache["stats"] = _compute_stats()
             scan_progress["systems_done"] += 1
             scan_progress["current_system"] = system_dir
@@ -1832,44 +1849,58 @@ def scan_progress_status():
 @app.route("/api/status")
 def status():
     """Return scan status and stats."""
-    return jsonify({
-        "last_scan": scan_cache["last_scan"],
-        "stats": scan_cache.get("stats") or None,
-    })
+    with _cache_lock:
+        return jsonify({
+            "last_scan": scan_cache["last_scan"],
+            "stats": scan_cache.get("stats") or None,
+        })
 
 
 @app.route("/api/systems")
 def list_systems():
     """List all scanned systems with summary info (no ROM lists)."""
     summaries = {}
-    for key, sys_info in scan_cache.get("systems", {}).items():
-        summaries[key] = {k: v for k, v in sys_info.items() if k != "roms"}
-    return jsonify(summaries)
+    # Readers serialize under _cache_lock: every writer mutates scan_cache entries in place
+    # under the same lock, so a response can never contain half-written data.
+    with _cache_lock:
+        for key, sys_info in scan_cache.get("systems", {}).items():
+            summaries[key] = {k: v for k, v in sys_info.items() if k != "roms"}
+        return jsonify(summaries)
 
 
 @app.route("/api/systems/<system_name>")
 def get_system(system_name):
     """Get full details for a system including ROM list."""
-    sys_info = scan_cache.get("systems", {}).get(system_name)
-    if not sys_info:
-        return jsonify({"error": "System not found"}), 404
-    return jsonify(sys_info)
+    with _cache_lock:
+        sys_info = scan_cache.get("systems", {}).get(system_name)
+        if not sys_info:
+            return jsonify({"error": "System not found"}), 404
+        return jsonify(sys_info)
 
 
 @app.route("/api/issues")
 def list_issues():
     """List all detected issues."""
     issue_type = request.args.get("type")
-    issues = scan_cache.get("issues", [])
-    if issue_type:
-        issues = [i for i in issues if i["type"] == issue_type]
-    return jsonify(issues)
+    with _cache_lock:
+        issues = scan_cache.get("issues", [])
+        if issue_type:
+            issues = [i for i in issues if i["type"] == issue_type]
+        return jsonify(issues)
 
 
 @app.route("/api/duplicates")
 def list_duplicates():
     """List duplicate ROMs."""
-    return jsonify(scan_cache.get("duplicates", []))
+    with _cache_lock:
+        return jsonify(scan_cache.get("duplicates", []))
+
+
+def _diag_counts():
+    """(total diagnostic issues, systems scanned) read consistently under the cache lock."""
+    with _cache_lock:
+        systems = scan_cache.get("systems", {})
+        return sum(len(si.get("diagnostic_issues", [])) for si in systems.values()), len(systems)
 
 
 def _trash_file(system, filename, src_path):
@@ -2076,12 +2107,13 @@ def search_roms():
         return jsonify([])
 
     results = []
-    for sys_name, sys_info in scan_cache.get("systems", {}).items():
-        for rom in sys_info.get("roms", []):
-            if query in rom["name"].lower():
-                results.append(rom)
-    results.sort(key=lambda r: r["name"].lower())
-    return jsonify(results[:200])  # cap results
+    with _cache_lock:
+        for sys_name, sys_info in scan_cache.get("systems", {}).items():
+            for rom in sys_info.get("roms", []):
+                if query in rom["name"].lower():
+                    results.append(rom)
+        results.sort(key=lambda r: r["name"].lower())
+        return jsonify(results[:200])  # cap results
 
 
 @app.route("/api/bios")
@@ -2095,12 +2127,13 @@ def get_diagnostics():
     """Return all ROM diagnostic issues across all systems (or filtered by ?system=)."""
     system_filter = request.args.get("system")
     all_diags = []
-    for sys_key, sys_info in scan_cache.get("systems", {}).items():
-        if system_filter and sys_key != system_filter:
-            continue
-        for diag in sys_info.get("diagnostic_issues", []):
-            all_diags.append(diag)
-    return jsonify(all_diags)
+    with _cache_lock:
+        for sys_key, sys_info in scan_cache.get("systems", {}).items():
+            if system_filter and sys_key != system_filter:
+                continue
+            for diag in sys_info.get("diagnostic_issues", []):
+                all_diags.append(diag)
+        return jsonify(all_diags)
 
 
 @app.route("/api/diagnostics/snapshot")
@@ -2117,14 +2150,18 @@ def diagnostics_snapshot():
         "share_accessible": os.path.exists(_roms_root()),
     }
 
-    scan_info = {
-        "last_scan": scan_cache.get("last_scan"),
-        "stats": scan_cache.get("stats") or {},
-    }
+    with _cache_lock:
+        scan_info = {
+            "last_scan": scan_cache.get("last_scan"),
+            "stats": dict(scan_cache.get("stats") or {}),
+        }
+        all_sys_diags = [
+            list(si.get("diagnostic_issues", [])) for si in scan_cache.get("systems", {}).values()
+        ]
 
     diag_by_type: dict[str, dict] = {}
-    for sys_info in scan_cache.get("systems", {}).values():
-        for diag in sys_info.get("diagnostic_issues", []):
+    for sys_diags in all_sys_diags:
+        for diag in sys_diags:
             key = diag.get("key", "unknown")
             if key not in diag_by_type:
                 sol = DIAGNOSTIC_SOLUTIONS.get(key, {})
@@ -2288,27 +2325,24 @@ def _cache_move_rom(src_system: str, dst_system: str, filename: str, new_path: s
 
 
 def _remove_diag_from_cache(system: str, diag_key: str, filename: str) -> None:
-    """Remove a resolved diagnostic from in-memory scan_cache."""
-    sys_info = scan_cache.get("systems", {}).get(system)
-    if not sys_info:
-        return
-    before = len(sys_info.get("diagnostic_issues", []))
-    sys_info["diagnostic_issues"] = [
-        d for d in sys_info.get("diagnostic_issues", [])
-        if not (d.get("key") == diag_key and d.get("file") == filename)
-    ]
-    removed = before - len(sys_info["diagnostic_issues"])
-    sys_info["diagnostic_count"] = max(0, sys_info.get("diagnostic_count", 0) - removed)
-    if scan_cache.get("stats") and removed:
-        scan_cache["stats"]["total_diagnostics"] = max(
-            0, scan_cache["stats"].get("total_diagnostics", 0) - removed
-        )
-    for rom in sys_info.get("roms", []):
-        if rom.get("name") == filename:
-            diags = rom.get("diagnostics", [])
-            if diag_key in diags:
-                diags.remove(diag_key)
-            break
+    """Remove a resolved diagnostic from in-memory scan_cache. Takes _cache_lock."""
+    with _cache_lock:
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if not sys_info:
+            return
+        before = len(sys_info.get("diagnostic_issues", []))
+        sys_info["diagnostic_issues"] = [
+            d for d in sys_info.get("diagnostic_issues", [])
+            if not (d.get("key") == diag_key and d.get("file") == filename)
+        ]
+        removed = before - len(sys_info["diagnostic_issues"])
+        sys_info["diagnostic_count"] = len(sys_info["diagnostic_issues"])
+        for rom in sys_info.get("roms", []):
+            if rom.get("name") == filename:
+                rom["diagnostics"] = [d for d in rom.get("diagnostics", []) if d != diag_key]
+                break
+        if removed and scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
 
 
 def _apply_scrape_to_cache(system, filename, *, cover_url=None, has_desc=False, game_name=""):
@@ -2635,11 +2669,8 @@ def kb_report():
     summary = {
         "title": title,
         "timestamp": datetime.now().isoformat(),
-        "diag_count": sum(
-            len(si.get("diagnostic_issues", []))
-            for si in scan_cache.get("systems", {}).values()
-        ),
-        "systems_scanned": len(scan_cache.get("systems", {})),
+        "diag_count": _diag_counts()[0],
+        "systems_scanned": _diag_counts()[1],
     }
     user_reports.insert(0, summary)
     while len(user_reports) > _USER_REPORTS_MAX:
@@ -2692,15 +2723,16 @@ def get_missing_covers():
         return jsonify({"ok": False, "error": "no_scan"})
     system_filter = request.args.get("system")
     missing = []
-    for sys_name, sys_info in scan_cache.get("systems", {}).items():
-        if system_filter and sys_name != system_filter:
-            continue
-        for rom in sys_info.get("roms", []):
-            if not rom.get("has_cover") and rom.get("issue") is None:
-                missing.append({
-                    **{k: rom[k] for k in ("name", "ext", "size_human", "system", "game_name", "has_metadata")},
-                    "system_name": sys_info["name"],
-                })
+    with _cache_lock:
+        for sys_name, sys_info in scan_cache.get("systems", {}).items():
+            if system_filter and sys_name != system_filter:
+                continue
+            for rom in sys_info.get("roms", []):
+                if not rom.get("has_cover") and rom.get("issue") is None:
+                    missing.append({
+                        **{k: rom[k] for k in ("name", "ext", "size_human", "system", "game_name", "has_metadata")},
+                        "system_name": sys_info["name"],
+                    })
     return jsonify(missing)
 
 
@@ -2711,15 +2743,16 @@ def get_missing_descriptions():
         return jsonify({"ok": False, "error": "no_scan"})
     system_filter = request.args.get("system")
     missing = []
-    for sys_name, sys_info in scan_cache.get("systems", {}).items():
-        if system_filter and sys_name != system_filter:
-            continue
-        for rom in sys_info.get("roms", []):
-            if not rom.get("has_description") and rom.get("issue") is None:
-                missing.append({
-                    **{k: rom[k] for k in ("name", "ext", "size_human", "system", "game_name", "has_metadata")},
-                    "system_name": sys_info["name"],
-                })
+    with _cache_lock:
+        for sys_name, sys_info in scan_cache.get("systems", {}).items():
+            if system_filter and sys_name != system_filter:
+                continue
+            for rom in sys_info.get("roms", []):
+                if not rom.get("has_description") and rom.get("issue") is None:
+                    missing.append({
+                        **{k: rom[k] for k in ("name", "ext", "size_human", "system", "game_name", "has_metadata")},
+                        "system_name": sys_info["name"],
+                    })
     return jsonify(missing)
 
 
@@ -2731,7 +2764,7 @@ def write_gamelist_entry(system_dir, rom_filename, fields):
     """
     # Serialize the read-parse-modify-write so two concurrent writers (e.g. overlapping
     # scrapes) for the same system can't clobber each other's changes.
-    with _cache_lock:
+    with _gamelist_lock:
         return _write_gamelist_entry_locked(system_dir, rom_filename, fields)
 
 
@@ -3696,10 +3729,11 @@ def _load_catalog(system_key: str) -> dict | None:
 
 def _owned_filenames(system_key: str) -> set[str]:
     """Filenames already present in the current scan for a system (to flag 'owned')."""
-    sys_info = scan_cache.get("systems", {}).get(system_key)
-    if not sys_info:
-        return set()
-    return {r["name"] for r in sys_info.get("roms", [])}
+    with _cache_lock:
+        sys_info = scan_cache.get("systems", {}).get(system_key)
+        if not sys_info:
+            return set()
+        return {r["name"] for r in sys_info.get("roms", [])}
 
 
 @app.route("/api/catalog/systems", methods=["GET"])
