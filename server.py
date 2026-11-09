@@ -129,7 +129,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.21"
+APP_VERSION = "2026.07.22"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -929,6 +929,154 @@ def _referenced_track_files(system_path: str, all_names) -> set:
     return refs
 
 
+# ─── Per-file probes: parallel + incremental ─────────────────────────────────
+# Phase 2 reads small slices of many files over SMB (~1-5 ms latency each). The probes are
+# I/O-bound and release the GIL, so they run in a thread pool, each file is opened once for
+# everything it needs, and results are cached by (size, mtime_ns) -- in memory and in
+# scan_cache.json -- so a rescan only touches files that changed.
+_PROBE_WORKERS = int(os.environ.get("RECALBOX_PROBE_WORKERS", "8"))
+_PROBE_CACHE_VERSION = 1
+_probe_cache: dict = {}          # "root|system|name" -> {size, mtime, probe, qhash, fhash}
+_probe_cache_lock = threading.Lock()
+_probe_cache_dirty = False
+
+
+def _probe_cache_path():
+    p = os.environ.get("RECALBOX_PROBE_CACHE")
+    if p and p.lower() in ("off", "none", "0"):
+        return None
+    return p or os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_cache.json")
+
+
+def _probe_key(system_key: str, name: str) -> str:
+    return f"{_roms_root()}|{system_key}|{name}"
+
+
+def _load_probe_cache() -> None:
+    path = _probe_cache_path()
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        if blob.get("version") == _PROBE_CACHE_VERSION and isinstance(blob.get("files"), dict):
+            with _probe_cache_lock:
+                _probe_cache.update(blob["files"])
+            logger.info(f"Loaded {len(_probe_cache)} cached file probes from {path}")
+    except (OSError, ValueError) as e:
+        logger.warning(f"Ignoring unreadable probe cache {path}: {e}")
+
+
+def _save_probe_cache() -> None:
+    global _probe_cache_dirty
+    path = _probe_cache_path()
+    if not path:
+        return
+    with _probe_cache_lock:
+        if not _probe_cache_dirty:
+            return
+        blob = {"version": _PROBE_CACHE_VERSION, "files": dict(_probe_cache)}
+        _probe_cache_dirty = False
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(blob, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.warning(f"Could not save probe cache: {e}")
+
+
+def _cache_get(system_key: str, rom: dict, field: str):
+    """Cached value for a ROM if its (size, mtime_ns) are unchanged, else None."""
+    mt = rom.get("mtime_ns")
+    if mt is None:
+        return None
+    with _probe_cache_lock:
+        e = _probe_cache.get(_probe_key(system_key, rom["name"]))
+        if e and e.get("size") == rom["size"] and e.get("mtime") == mt:
+            return e.get(field)
+    return None
+
+
+def _cache_put(system_key: str, rom: dict, field: str, value) -> None:
+    global _probe_cache_dirty
+    mt = rom.get("mtime_ns")
+    if mt is None or value is None:
+        return
+    key = _probe_key(system_key, rom["name"])
+    with _probe_cache_lock:
+        e = _probe_cache.get(key)
+        if not e or e.get("size") != rom["size"] or e.get("mtime") != mt:
+            e = _probe_cache[key] = {"size": rom["size"], "mtime": mt}
+        e[field] = value
+        _probe_cache_dirty = True
+
+
+_OVERDUMP_SKIP_SYSTEMS = {"n64", "gba"}
+_OVERDUMP_SKIP_EXTS = {".zip", ".7z", ".cue", ".m3u", ".chd", ".iso", ".pbp"}
+
+
+def _probe_rom(system_key: str, rom: dict, need_contents: bool) -> dict:
+    """Everything the content diagnostics need from one file, using as few opens as possible:
+    zip integrity + listing share one ZipFile, the NES magic and the overdump tail share one
+    open(). Never raises."""
+    path, ext, size = rom["path"], rom["ext"], rom["size"]
+    probe: dict = {"has_contents": need_contents}
+    try:
+        if ext == ".zip":
+            try:
+                with zipfile.ZipFile(path, "r") as zf:
+                    probe["zip_valid"] = True
+                    if need_contents:
+                        probe["inner_names"] = zf.namelist()
+            except zipfile.BadZipFile:
+                probe["zip_valid"] = False
+            except OSError:
+                raise
+            except Exception:  # noqa: BLE001 — odd-but-present archive: valid for integrity, unlistable
+                probe["zip_valid"] = True
+        elif ext == ".7z" and need_contents:
+            names = _list_archive_contents(path, ext)
+            if names is not None:
+                probe["inner_names"] = names
+        want_tail = (size >= 65536 and system_key not in _OVERDUMP_SKIP_SYSTEMS
+                     and ext not in _OVERDUMP_SKIP_EXTS)
+        want_nes = system_key in {"nes", "fds"} and ext == ".nes" and size >= 16
+        if want_tail or want_nes:
+            with open(path, "rb") as f:
+                if want_nes:
+                    probe["nes_magic"] = f.read(4) == b"NES\x1a"
+                if want_tail:
+                    f.seek(-512, 2)
+                    tail = f.read(512)
+                    probe["tail_uniform"] = bool(
+                        tail and tail == bytes([tail[0]]) * len(tail) and tail[0] in (0x00, 0xFF))
+    except (OSError, ValueError):
+        probe["io_error"] = True
+    return probe
+
+
+def _probe_roms(system_key: str, roms: list, need_contents: bool) -> dict:
+    """name -> probe dict for every ROM, parallel and cache-aware."""
+    from concurrent.futures import ThreadPoolExecutor
+    out: dict = {}
+    todo = []
+    for rom in roms:
+        cached = _cache_get(system_key, rom, "probe")
+        # a probe taken without the archive listing can't serve a request that needs it
+        if cached is not None and (cached.get("has_contents") or not need_contents):
+            out[rom["name"]] = cached
+        else:
+            todo.append(rom)
+    if todo:
+        with ThreadPoolExecutor(max_workers=max(1, _PROBE_WORKERS)) as pool:
+            for rom, probe in zip(todo, pool.map(lambda r: _probe_rom(system_key, r, need_contents), todo)):
+                out[rom["name"]] = probe
+                if not probe.get("io_error"):
+                    _cache_put(system_key, rom, "probe", probe)
+    return out
+
+
 def run_rom_diagnostics(
     system_key: str, system_path: str, roms: list[dict], all_names: set[str] | None = None
 ) -> list[dict]:
@@ -1046,52 +1194,37 @@ def run_rom_diagnostics(
             diag_issues.append(diag)
             rom["diagnostics"].append("empty_file")
 
+    # All file-content I/O for checks 5, 6, 7 and 9 happens here, in parallel and cached.
+    core_exts = get_core_extensions(system_key)
+    probes = _probe_roms(system_key, roms, need_contents=bool(core_exts))
+
     # --- Check 5: Likely overdump (last 512 bytes all 0xFF or 0x00) ---
     # Skip systems where 0xFF tail padding is normal: N64 and GBA cartridges use erased-flash
     # (0xFF) to fill unused ROM address space, so clean verified dumps commonly end with 0xFF.
-    _overdump_skip_systems = {"n64", "gba"}
-    if system_key not in _overdump_skip_systems:
-        for rom in roms:
-            if rom["size"] < 65536:
-                continue  # too small to meaningfully sample
-            if rom["ext"] in {".zip", ".7z", ".cue", ".m3u", ".chd", ".iso", ".pbp"}:
-                continue  # compressed/metadata formats
-            try:
-                fpath = rom["path"]
-                with open(fpath, "rb") as f:
-                    f.seek(-512, 2)
-                    tail = f.read(512)
-                if tail and (tail == bytes([tail[0]]) * len(tail)) and tail[0] in (0x00, 0xFF):
-                    diag = {
-                        "key": "likely_overdump",
-                        "file": rom["name"],
-                        "system": system_key,
-                        **{k: DIAGNOSTIC_SOLUTIONS["likely_overdump"][k] for k in ("title", "description")},
-                    }
-                    diag_issues.append(diag)
-                    rom["diagnostics"].append("likely_overdump")
-            except OSError:
-                pass
+    for rom in roms:
+        if probes.get(rom["name"], {}).get("tail_uniform"):
+            diag = {
+                "key": "likely_overdump",
+                "file": rom["name"],
+                "system": system_key,
+                **{k: DIAGNOSTIC_SOLUTIONS["likely_overdump"][k] for k in ("title", "description")},
+            }
+            diag_issues.append(diag)
+            rom["diagnostics"].append("likely_overdump")
 
     # --- Check 6: Corrupt ZIP archives ---
     for rom in roms:
-        if rom["ext"] not in {".zip"}:
-            continue
-        try:
-            if not zipfile.is_zipfile(rom["path"]):
-                diag = {
-                    "key": "corrupt_archive",
-                    "file": rom["name"],
-                    "system": system_key,
-                    **{k: DIAGNOSTIC_SOLUTIONS["corrupt_archive"][k] for k in ("title", "description")},
-                }
-                diag_issues.append(diag)
-                rom["diagnostics"].append("corrupt_archive")
-        except OSError:
-            pass
+        if rom["ext"] == ".zip" and probes.get(rom["name"], {}).get("zip_valid") is False:
+            diag = {
+                "key": "corrupt_archive",
+                "file": rom["name"],
+                "system": system_key,
+                **{k: DIAGNOSTIC_SOLUTIONS["corrupt_archive"][k] for k in ("title", "description")},
+            }
+            diag_issues.append(diag)
+            rom["diagnostics"].append("corrupt_archive")
 
     # --- Check 7: ZIP/7z content inspection ---
-    core_exts = get_core_extensions(system_key)
     if core_exts:  # skip MAME/neogeo/archive-only systems
         for rom in roms:
             if rom["ext"] not in {".zip", ".7z"}:
@@ -1099,7 +1232,7 @@ def run_rom_diagnostics(
             if "corrupt_archive" in rom.get("diagnostics", []):
                 continue  # already flagged broken — skip
 
-            inner_names = _list_archive_contents(rom["path"], rom["ext"])
+            inner_names = probes.get(rom["name"], {}).get("inner_names")
             if inner_names is None:
                 continue
 
@@ -1166,20 +1299,15 @@ def run_rom_diagnostics(
                 continue
             if "empty_file" in rom.get("diagnostics", []):
                 continue  # already flagged
-            try:
-                with open(rom["path"], "rb") as f:
-                    magic = f.read(4)
-                if magic != b"NES\x1a":
-                    diag = {
-                        "key": "invalid_nes_header",
-                        "file": rom["name"],
-                        "system": system_key,
-                        **{k: DIAGNOSTIC_SOLUTIONS["invalid_nes_header"][k] for k in ("title", "description")},
-                    }
-                    diag_issues.append(diag)
-                    rom["diagnostics"].append("invalid_nes_header")
-            except OSError:
-                pass
+            if probes.get(rom["name"], {}).get("nes_magic") is False:
+                diag = {
+                    "key": "invalid_nes_header",
+                    "file": rom["name"],
+                    "system": system_key,
+                    **{k: DIAGNOSTIC_SOLUTIONS["invalid_nes_header"][k] for k in ("title", "description")},
+                }
+                diag_issues.append(diag)
+                rom["diagnostics"].append("invalid_nes_header")
 
     # --- Check 10: N64 non-canonical byte order ---
     # The canonical N64 format is big-endian (.z64). Byte-swapped (.v64) and little-endian
@@ -1499,9 +1627,10 @@ def _scan_inventory() -> dict:
                         continue
 
                     try:
-                        size = entry.stat().st_size
+                        _st = entry.stat()
+                        size, mtime_ns = _st.st_size, _st.st_mtime_ns
                     except OSError:
-                        size = 0
+                        size, mtime_ns = 0, None
 
                     total_files += 1
 
@@ -1516,6 +1645,7 @@ def _scan_inventory() -> dict:
                         "name": entry.name,
                         "ext": ext,
                         "size": size,
+                        "mtime_ns": mtime_ns,
                         "size_human": format_size(size),
                         "path": entry.path,
                         "system": system_dir,
@@ -1677,24 +1807,40 @@ def _scan_deep() -> None:
 
     # Quick 64 KB hash only selects candidates, keyed by (size, quick_hash). Each candidate
     # group is then confirmed with a full-content hash, so ROM hacks / revisions that share a
-    # header are never reported as duplicates.
-    candidates: dict[tuple, list] = defaultdict(list)
-    for size, group in size_index.items():
-        if len(group) < 2:
-            continue  # unique size — cannot be a duplicate, skip the hash read entirely
-        for (s, name, path, sz) in group:
-            qhash = get_file_hash(path)
-            if qhash:
-                candidates[(size, qhash)].append((s, name, path, sz))
+    # header are never reported as duplicates. Hashing is parallel and cached by (size, mtime).
+    from concurrent.futures import ThreadPoolExecutor
+    rom_by_loc: dict = {}
+    with _cache_lock:
+        for system_dir, sys_info in scan_cache.get("systems", {}).items():
+            for rom in sys_info["roms"]:
+                rom_by_loc[(system_dir, rom["name"])] = rom
 
+    def _hash_task(task):
+        field, (sysd, name, path, sz) = task
+        rom = rom_by_loc.get((sysd, name)) or {"name": name, "size": sz, "mtime_ns": None}
+        cached = _cache_get(sysd, rom, field)
+        if cached:
+            return cached
+        h = get_file_hash(path) if field == "qhash" else get_full_hash(path)
+        if h:
+            _cache_put(sysd, rom, field, h)
+        return h
+
+    group_items = [item for size, group in size_index.items() if len(group) >= 2 for item in group]
+    with ThreadPoolExecutor(max_workers=max(1, _PROBE_WORKERS)) as pool:
+        qhashes = list(pool.map(_hash_task, (("qhash", it) for it in group_items)))
+    candidates: dict[tuple, list] = defaultdict(list)
+    for item, qh in zip(group_items, qhashes):
+        if qh:
+            candidates[(item[3], qh)].append(item)
+
+    confirm_items = [item for group in candidates.values() if len(group) >= 2 for item in group]
+    with ThreadPoolExecutor(max_workers=max(1, _PROBE_WORKERS)) as pool:
+        fhashes = list(pool.map(_hash_task, (("fhash", it) for it in confirm_items)))
     all_hashes: dict[str, list] = defaultdict(list)
-    for group in candidates.values():
-        if len(group) < 2:
-            continue
-        for (s, name, path, sz) in group:
-            fhash = get_full_hash(path)
-            if fhash:
-                all_hashes[f"{sz}:{fhash}"].append((s, name, sz))
+    for (s_, name, path, sz), fh in zip(confirm_items, fhashes):
+        if fh:
+            all_hashes[f"{sz}:{fh}"].append((s_, name, sz))
 
     duplicates = []
     dup_issues = []
@@ -1718,6 +1864,7 @@ def _scan_deep() -> None:
         scan_cache["stats"] = _compute_stats()
         stats = scan_cache["stats"]
 
+    _save_probe_cache()
     logger.info(
         f"Deep analysis complete: {stats.get('total_duplicates', 0)} duplicate groups, "
         f"{stats.get('total_diagnostics', 0)} diagnostic findings"
@@ -4585,6 +4732,7 @@ if __name__ == "__main__":
     logger.info(f"Starting Recalbox ROM Manager on http://localhost:{port}")
     logger.info(f"Recalbox share path: {_config['share']}")
     logger.info(f"ROMs root: {_roms_root()}")
+    _load_probe_cache()
     if not PY7ZR_AVAILABLE:
         logger.warning(
             "py7zr is NOT installed — .7z archives cannot be inspected. "

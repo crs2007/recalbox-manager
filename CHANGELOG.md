@@ -2,6 +2,11 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.22 — 2026-11-09
+### Performance
+- **Deep scan read files one at a time over SMB and kept nothing between runs** (#22) — the content diagnostics (overdump tail, ZIP integrity + listing, NES magic) now run through `_probe_roms()`: a thread pool (`RECALBOX_PROBE_WORKERS`, default 8), one `open()` per file for everything it needs, and one `ZipFile` handle shared by the integrity and contents checks (the old `is_zipfile` + second open is gone). Duplicate-candidate quick/full hashes are parallel too. Results are cached by `(size, mtime_ns)` per file, in memory and in `scan_cache.json` (gitignored; set `RECALBOX_PROBE_CACHE=off` to disable or point it elsewhere), so a rescan or restart only re-reads files that changed.
+- Not done: restoring the last inventory at startup so the UI has data immediately, and turning `/api/catalog/download` into a background job.
+
 ## v2026.07.21 — 2026-11-09
 ### Performance
 - **The frontend re-downloaded the whole system's ROM list and re-rendered the whole app on every scrape, poll tick and toast** (#21) — scrape responses now carry the updated `stats` and the UI patches the open system's ROM row in place instead of calling `loadSystem()` + `/api/status` after every ROM (which also stops resetting the page and filter). Toasts render into their own `#toasts` container and never touch `#app`. Scan polling re-renders the app only when a system was committed or the phase changed; otherwise it repaints just the progress bar. Browse view memoizes its sort per system with a shared `Intl.Collator` and cards use an index-based delegated click instead of embedding `JSON.stringify(rom)` in every card. The nine post-scan requests now run in parallel, and `/api/systems/<name>` no longer includes each ROM's absolute UNC `path`.

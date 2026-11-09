@@ -59,6 +59,8 @@ const test = base.extend({
       env: {
         ...process.env,
         RECALBOX_SHARE: MOCK_DATA,
+        // Never read/write the developer's real scan_cache.json from the test server
+        RECALBOX_PROBE_CACHE: 'off',
         PORT: String(SERVER_PORT),
         // Disable Werkzeug reloader — prevents orphan child processes that hold the port
         // open after we kill the parent process during fixture teardown
