@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.6"
+APP_VERSION = "2026.07.7"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1922,21 +1922,7 @@ def trash_duplicate():
     except OSError as e:
         return jsonify({"error": str(e)}), 500
     logger.info(f"Trashed duplicate {trash['file']} from {trash['system']} (identical to {keep['system']}/{keep['file']})")
-    with _cache_lock:
-        _remove_rom_from_cache(trash["system"], trash["file"])
-        remaining = []
-        for g in scan_cache.get("duplicates", []):
-            g["copies"] = [c for c in g["copies"]
-                           if not (c["system"] == trash["system"] and c["file"] == trash["file"])]
-            if len(g["copies"]) > 1:
-                remaining.append(g)
-        scan_cache["duplicates"] = remaining
-        scan_cache["issues"] = [
-            i for i in scan_cache.get("issues", [])
-            if not (i.get("type") == "duplicate" and len(i.get("copies", [])) > 0
-                    and not any(g["hash"] == i.get("hash") for g in remaining))
-        ]
-        scan_cache["stats"] = _compute_stats()
+    _cache_remove_rom(trash["system"], trash["file"])
     return jsonify({"ok": True, "trash_path": trash_path})
 
 
@@ -1984,6 +1970,7 @@ def move_rom():
                 trash_path = _trash_file(src_system, filename, src_path)
             except OSError as e:
                 return jsonify({"error": str(e)}), 500
+            _cache_remove_rom(src_system, filename)
             logger.info(f"Trashed misplaced duplicate {filename} from {src_system} (identical copy already in {dst_system})")
             return jsonify({
                 "ok": True,
@@ -1997,7 +1984,7 @@ def move_rom():
     try:
         shutil.move(src_path, dst_path)
         logger.info(f"Moved {filename}: {src_system} -> {dst_system}")
-        _remove_rom_from_cache(src_system, filename)
+        _cache_move_rom(src_system, dst_system, filename, dst_path)
         return jsonify({"ok": True, "moved": {"file": filename, "from": src_system, "to": dst_system}})
     except (OSError, shutil.Error) as e:
         return jsonify({"error": str(e)}), 500
@@ -2028,6 +2015,7 @@ def delete_rom():
     # Move to trash instead of deleting
     try:
         trash_path = _trash_file(system, filename, src_path)
+        _cache_remove_rom(system, filename)
         logger.info(f"Trashed {filename} from {system} -> {trash_path}")
         return jsonify({"ok": True, "trashed": {"file": filename, "system": system}, "trash_path": trash_path})
     except OSError as e:
@@ -2064,11 +2052,12 @@ def bulk_move():
                 logger.info(f"Created system folder: {dst_dir}")
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.move(src, dst)
-                _remove_rom_from_cache(from_system, filename)
+                _cache_move_rom(from_system, to_system, filename, dst)
                 results.append({"file": filename, "status": "moved"})
             elif os.path.exists(src) and os.path.exists(dst):
                 if files_identical(src, dst):
                     trash_path = _trash_file(from_system, filename, src)
+                    _cache_remove_rom(from_system, filename)
                     results.append({"file": filename, "status": "trashed_duplicate", "trash_path": trash_path})
                 else:
                     results.append({"file": filename, "status": "skipped", "reason": "different content"})
@@ -2173,32 +2162,129 @@ def _safe_rom_path(system: str, filename: str):
     return path, None
 
 
-def _remove_rom_from_cache(system: str, filename: str) -> None:
-    """Remove a ROM entry (and its diagnostics) from scan_cache after a move or delete."""
-    sys_info = scan_cache.get("systems", {}).get(system)
-    if not sys_info:
-        return
-    before = len(sys_info.get("roms", []))
-    sys_info["roms"] = [r for r in sys_info.get("roms", []) if r.get("name") != filename]
-    removed = before - len(sys_info["roms"])
-    if not removed:
-        return
-    sys_info["total_roms"] = max(0, sys_info.get("total_roms", 0) - removed)
-    # Remove associated diagnostic issues
-    before_diag = len(sys_info.get("diagnostic_issues", []))
-    sys_info["diagnostic_issues"] = [d for d in sys_info.get("diagnostic_issues", []) if d.get("file") != filename]
-    removed_diag = before_diag - len(sys_info["diagnostic_issues"])
-    sys_info["diagnostic_count"] = max(0, sys_info.get("diagnostic_count", 0) - removed_diag)
-    # Remove from global issues list
-    scan_cache["issues"] = [
-        i for i in scan_cache.get("issues", [])
-        if not (i.get("current_system") == system and i.get("file") == filename)
-    ]
-    # Update global stats
-    stats = scan_cache.get("stats", {})
-    if stats:
-        stats["total_files"] = max(0, stats.get("total_files", 0) - removed)
-        stats["total_diagnostics"] = max(0, stats.get("total_diagnostics", 0) - removed_diag)
+def _recount_system(sys_info: dict) -> None:
+    """Recompute every per-system counter from sys_info['roms']. Call under _cache_lock."""
+    roms = sys_info.get("roms", [])
+    misplaced = sum(1 for r in roms if r.get("issue") == "wrong_system")
+    unknown = sum(1 for r in roms if r.get("issue") == "unknown_system")
+    sys_info["total_roms"] = len(roms)
+    sys_info["misplaced_count"] = misplaced
+    sys_info["unknown_count"] = unknown
+    sys_info["ok_count"] = len(roms) - misplaced - unknown
+    sys_info["cover_count"] = sum(1 for r in roms if r.get("has_cover"))
+    sys_info["description_count"] = sum(1 for r in roms if r.get("has_description"))
+    sys_info["diagnostic_count"] = len(sys_info.get("diagnostic_issues", []))
+
+
+def _cache_remove_rom(system: str, filename: str) -> bool:
+    """Remove a ROM from scan_cache (roms, per-system counters, issues, diagnostics,
+    duplicate copies) and refresh the stats block. Takes _cache_lock. Returns True if removed."""
+    with _cache_lock:
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if not sys_info:
+            return False
+        before = len(sys_info.get("roms", []))
+        sys_info["roms"] = [r for r in sys_info.get("roms", []) if r.get("name") != filename]
+        if len(sys_info["roms"]) == before:
+            return False
+        sys_info["diagnostic_issues"] = [
+            d for d in sys_info.get("diagnostic_issues", []) if d.get("file") != filename
+        ]
+        _recount_system(sys_info)
+        scan_cache["issues"] = [
+            i for i in scan_cache.get("issues", [])
+            if not (i.get("current_system") == system and i.get("file") == filename)
+        ]
+        # Drop this copy from duplicate groups; a group left with one copy is no longer a duplicate.
+        groups = []
+        for g in scan_cache.get("duplicates", []):
+            g["copies"] = [c for c in g["copies"] if not (c["system"] == system and c["file"] == filename)]
+            if len(g["copies"]) > 1:
+                groups.append(g)
+        live = {g["hash"] for g in groups}
+        scan_cache["duplicates"] = groups
+        scan_cache["issues"] = [
+            i for i in scan_cache["issues"]
+            if not (i.get("type") == "duplicate" and i.get("hash") not in live)
+        ]
+        for i in scan_cache["issues"]:
+            if i.get("type") == "duplicate":
+                i["copies"] = [c for c in i.get("copies", [])
+                               if not (c.get("system") == system and c.get("file") == filename)]
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
+        return True
+
+
+def _cache_add_rom(system: str, rom_info: dict) -> None:
+    """Add (or replace) a ROM in scan_cache, classifying its placement by extension like the
+    scanner does, then recount and refresh stats. Takes _cache_lock."""
+    system_key = system.lower()
+    known = system_key in SYSTEM_EXTENSIONS
+    valid_exts = SYSTEM_EXTENSIONS.get(system_key, set())
+    ext = rom_info.get("ext") or os.path.splitext(rom_info["name"])[1].lower()
+    rom = dict(rom_info)
+    rom["system"] = system
+    rom["ext"] = ext
+    rom.pop("suggested_systems", None)
+    rom["diagnostics"] = []
+    suggested = list(EXTENSION_TO_SYSTEMS.get(ext, set()) - {system_key})
+    new_issue = None
+    if not known:
+        rom["issue"] = "unknown_system"
+        rom["suggested_systems"] = suggested
+        new_issue = {"type": "unknown_system", "file": rom["name"], "current_system": system,
+                     "ext": ext, "size_human": rom.get("size_human", "")}
+    elif valid_exts and ext not in valid_exts:
+        rom["issue"] = "wrong_system"
+        rom["suggested_systems"] = suggested
+        new_issue = {"type": "misplaced", "file": rom["name"], "current_system": system,
+                     "suggested_systems": suggested, "ext": ext, "size_human": rom.get("size_human", "")}
+    else:
+        rom["issue"] = None
+    with _cache_lock:
+        systems = scan_cache.setdefault("systems", {})
+        sys_info = systems.get(system)
+        if sys_info is None:
+            sys_info = systems[system] = {
+                "name": SYSTEM_DISPLAY_NAMES.get(system_key, system), "folder": system,
+                "known": known, "total_roms": 0, "misplaced_count": 0, "unknown_count": 0,
+                "ignored_count": 0, "ok_count": 0, "diagnostic_count": 0, "cover_count": 0,
+                "description_count": 0, "roms": [], "valid_extensions": sorted(valid_exts),
+                "diagnostic_issues": [], "deep_pending": False,
+            }
+        sys_info["roms"] = [r for r in sys_info["roms"] if r.get("name") != rom["name"]]
+        sys_info["roms"].append(rom)
+        _recount_system(sys_info)
+        scan_cache["issues"] = [
+            i for i in scan_cache.get("issues", [])
+            if not (i.get("current_system") == system and i.get("file") == rom["name"])
+        ]
+        if new_issue:
+            scan_cache["issues"].append(new_issue)
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
+
+
+def _cache_move_rom(src_system: str, dst_system: str, filename: str, new_path: str) -> None:
+    """Reflect a file move in scan_cache: take the ROM's entry out of the source system and
+    add it to the destination (re-classified there)."""
+    with _cache_lock:
+        old = next((r for r in scan_cache.get("systems", {}).get(src_system, {}).get("roms", [])
+                    if r.get("name") == filename), None)
+        info = dict(old) if old else None
+    if info is None:
+        try:
+            size = os.path.getsize(new_path)
+        except OSError:
+            size = 0
+        info = {"name": filename, "size": size, "size_human": format_size(size),
+                "game_name": "", "has_metadata": False, "has_cover": False,
+                "cover_url": None, "has_description": False}
+    info["path"] = new_path
+    info.pop("issue", None)
+    _cache_remove_rom(src_system, filename)
+    _cache_add_rom(dst_system, info)
 
 
 def _remove_diag_from_cache(system: str, diag_key: str, filename: str) -> None:
@@ -2714,7 +2800,9 @@ def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
         return {"ok": False, "error": "write_error", "detail": str(e)}
 
     # Refresh in-memory gamelist cache for this system
-    scan_cache["gamelists"][system_dir] = parse_gamelist(system_dir)
+    _gl = parse_gamelist(system_dir)
+    with _cache_lock:
+        scan_cache.setdefault("gamelists", {})[system_dir] = _gl
 
     return {"ok": True, "created": created}
 
@@ -2797,15 +2885,16 @@ def repair_gamelist():
     logger.info(f"Repaired gamelist.xml for {system} (removed {len(trailing)} bytes of trailing junk)")
 
     # Refresh in-memory cache
-    scan_cache["gamelists"][system] = parse_gamelist(system)
-
-    # Remove the corresponding issue from scan_cache
-    scan_cache["issues"] = [
-        i for i in scan_cache.get("issues", [])
-        if not (i.get("type") == "corrupted_gamelist" and i.get("system") == system)
-    ]
-    if scan_cache.get("stats"):
-        scan_cache["stats"]["total_issues"] = len(scan_cache["issues"])
+    _gl = parse_gamelist(system)
+    with _cache_lock:
+        scan_cache.setdefault("gamelists", {})[system] = _gl
+        # Remove the corresponding issue from scan_cache
+        scan_cache["issues"] = [
+            i for i in scan_cache.get("issues", [])
+            if not (i.get("type") == "corrupted_gamelist" and i.get("system") == system)
+        ]
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
 
     return jsonify({
         "ok": True,
@@ -3790,33 +3879,18 @@ def catalog_download():
     write_result = write_gamelist_entry(system, filename, fields)
 
     # Reflect the new ROM in the in-memory cache so the rest of the UI sees it without a rescan.
-    sys_info = scan_cache.get("systems", {}).get(system)
-    if sys_info is not None:
-        if not any(r.get("name") == filename for r in sys_info.get("roms", [])):
-            sys_info.setdefault("roms", []).append({
-                "name": filename,
-                "ext": ext,
-                "size": written,
-                "size_human": format_size(written),
-                "path": dst_path,
-                "system": system,
-                "game_name": game_name,
-                "has_metadata": True,
-                "has_cover": bool(cover_url),
-                "cover_url": cover_url,
-                "has_description": bool(desc_text),
-                "issue": None,
-            })
-            sys_info["total_roms"] = len(sys_info["roms"])
-            sys_info["ok_count"] = sys_info.get("ok_count", 0) + 1
-            if cover_url:
-                sys_info["cover_count"] = sys_info.get("cover_count", 0) + 1
-            if desc_text:
-                sys_info["description_count"] = sys_info.get("description_count", 0) + 1
-        if scan_cache.get("stats"):
-            scan_cache["stats"]["total_files"] = sum(
-                s.get("total_roms", 0) for s in scan_cache.get("systems", {}).values()
-            )
+    _cache_add_rom(system, {
+        "name": filename,
+        "ext": ext,
+        "size": written,
+        "size_human": format_size(written),
+        "path": dst_path,
+        "game_name": game_name,
+        "has_metadata": True,
+        "has_cover": bool(cover_url),
+        "cover_url": cover_url,
+        "has_description": bool(desc_text),
+    })
 
     return jsonify({
         "ok": True,

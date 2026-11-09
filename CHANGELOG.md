@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.7 — 2026-11-09
+### Fixed
+- **`scan_cache` drifted out of sync after delete / move / download** (#7) — new lock-taking helpers `_cache_remove_rom`, `_cache_add_rom` and `_cache_move_rom` update ROM lists, every per-system counter (misplaced/ok/cover/description/diagnostic), issues, diagnostics and duplicate groups, then refresh stats via `_compute_stats()`. `/api/delete` now updates the cache (trashed ROMs no longer reappear), a moved ROM now shows up in its destination system, trashed-duplicate branches and catalog downloads use the same helpers, and gamelist cache/repair updates run under `_cache_lock`. The old hand-written decrement code is gone.
+
 ## v2026.07.6 — 2026-11-09
 ### Fixed
 - **ScreenScraper covers were saved with a `.php` extension** (#6) — the extension came from the media URL path (`mediaJeu.php`). It is now sniffed from the image bytes via the shared `_sniff_image_ext()` (also used by `/api/covers/download-url`, and now checks the `WEBP` tag), and non-image responses (text quota errors returned with HTTP 200) are rejected. Existing `.php` covers from earlier versions are not migrated automatically — re-scrape or rename them.
