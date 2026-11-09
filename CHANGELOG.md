@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.20 — 2026-11-09
+### Performance
+- **Each gamelist write cost O(gamelist size) in SMB I/O while holding the global lock** (#20) — gamelist writes run under their own `_gamelist_lock` (the global `_cache_lock` is only held for in-memory work, so `/api/scan/progress` and the scan no longer stall behind a bulk scrape). A parsed tree is cached per system (reloaded if the file changed on disk), the post-write re-parse + `scandir` is gone (the in-memory gamelist cache is updated in place), and the per-write `.bak` copy was already removed. Bulk scrapes send `defer:true`, which batches the disk write: one flush per 25 updates, after 10 s idle, at the end/stop of the queue (`POST /api/gamelist/flush`) and at exit. Scans, moves and repair flush pending edits first. A bulk run goes from ~5 full-file transfers per ROM to ~1 write per 25 ROMs.
+
 ## v2026.07.19 — 2026-11-09
 ### Fixed
 - **`strip-smc-header` rewrote the ROM in place non-atomically and could skip the backup** (#19) — the headerless ROM is now written to `<rom>.tmp` and swapped in with `os.replace`, so a dropped connection can't truncate it. A backup is always taken: `<rom>.bak`, or a timestamped `<rom>.<YYYYmmdd-HHMMSS>.bak` if a `.bak` already exists (a stale one may belong to a different file). The cached ROM size is updated. The file is **not** renamed to `.sfc` — both extensions are valid for SNES and keeping the name keeps the gamelist entry and cover linked; the docs now say so.

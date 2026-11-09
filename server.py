@@ -23,6 +23,7 @@ import mimetypes
 import socket
 import ipaddress
 import threading
+import atexit
 import time
 import configparser
 import xml.etree.ElementTree as ET
@@ -128,7 +129,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.19"
+APP_VERSION = "2026.07.20"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1250,6 +1251,8 @@ def parse_gamelist(system_dir: str, info: dict | None = None) -> dict:
     """
     xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
     result = {}
+    with _gamelist_lock:                       # make deferred edits visible to this read
+        _gl_flush_locked(system_dir)
     if info is not None:
         info.update({"present": os.path.exists(xml_path), "corrupted": False,
                      "recoverable": False, "error": None, "repair_kind": None})
@@ -2185,6 +2188,17 @@ def _free_name(directory: str, name: str) -> str:
 
 
 def _move_rom_metadata(src_system: str, dst_system: str, filename: str) -> dict:
+    with _gamelist_lock:
+        for sysname in (src_system, dst_system):
+            _gl_flush_locked(sysname)
+        try:
+            return _move_rom_metadata_inner(src_system, dst_system, filename)
+        finally:
+            _gl_invalidate(src_system)
+            _gl_invalidate(dst_system)
+
+
+def _move_rom_metadata_inner(src_system: str, dst_system: str, filename: str) -> dict:
     """After a ROM file moved src -> dst, carry its gamelist <game> entry and cover/thumbnail
     files along (instead of orphaning them in the old system and leaving the ROM bare in the
     new one). If the destination already has an entry for the ROM, the source entry is simply
@@ -3180,41 +3194,142 @@ def get_missing_descriptions():
     return jsonify(missing)
 
 
-def write_gamelist_entry(system_dir, rom_filename, fields):
+# ─── gamelist.xml write path ──────────────────────────────────────────────────
+# A parsed tree per system is kept in memory (_gl_state) so a scrape no longer re-reads and
+# re-parses the whole file over SMB for every ROM. Callers may *defer* the flush (bulk scrape):
+# the tree is then written once per _GL_FLUSH_EVERY updates, after _GL_IDLE_FLUSH_S of idle
+# time, on POST /api/gamelist/flush, and at exit. Anything else that reads or rewrites
+# gamelist.xml from disk (parse_gamelist, move, repair) flushes first and drops the cached tree.
+# Lock order: _gamelist_lock -> _cache_lock. _cache_lock is only ever held for in-memory work.
+_gamelist_bak_done: set = set()   # systems whose gamelist.xml.bak was taken this session
+_gl_state: dict = {}              # system -> {"tree", "mtime", "pending", "timer"}
+_GL_FLUSH_EVERY = 25
+_GL_IDLE_FLUSH_S = 10.0
+
+
+def _gl_mtime(system_dir: str):
+    try:
+        return os.stat(os.path.join(_roms_root(), system_dir, "gamelist.xml")).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _gl_tree_for(system_dir: str) -> dict:
+    """Cached parsed tree for a system, reloaded if the file changed on disk and we have no
+    unflushed edits. Call under _gamelist_lock. Raises ET.ParseError / OSError."""
+    xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
+    st = _gl_state.get(system_dir)
+    mt = _gl_mtime(system_dir)
+    if st and (st["pending"] > 0 or st["mtime"] == mt):
+        return st
+    if st and st.get("timer"):
+        st["timer"].cancel()
+    if mt is not None:
+        rec_info: dict = {}
+        tree = _load_gamelist_tree(xml_path, rec_info)
+        if rec_info.get("recoverable"):
+            logger.warning(f"gamelist.xml for {system_dir} had trailing junk; repaired while saving")
+    else:
+        tree = ET.ElementTree(ET.Element("gameList"))
+    st = {"tree": tree, "mtime": mt, "pending": 0, "timer": None}
+    _gl_state[system_dir] = st
+    return st
+
+
+def _gl_flush_locked(system_dir: str):
+    """Write a system's pending edits. Returns None on success / nothing to do, else an error
+    string (the edits stay pending so a later flush retries). Call under _gamelist_lock."""
+    st = _gl_state.get(system_dir)
+    if not st or not st["pending"]:
+        return None
+    err = _save_gamelist_tree(system_dir, st["tree"])
+    if err:
+        return err
+    if st.get("timer"):
+        st["timer"].cancel()
+        st["timer"] = None
+    st["pending"] = 0
+    st["mtime"] = _gl_mtime(system_dir)
+    return None
+
+
+def _gl_invalidate(system_dir: str) -> None:
+    """Forget the cached tree (after something else rewrote the file). Call under _gamelist_lock."""
+    st = _gl_state.pop(system_dir, None)
+    if st and st.get("timer"):
+        st["timer"].cancel()
+
+
+def _gl_idle_flush(system_dir: str) -> None:
+    with _gamelist_lock:
+        err = _gl_flush_locked(system_dir)
+    if err:
+        logger.warning(f"Deferred gamelist flush failed for {system_dir}: {err}")
+
+
+def flush_gamelists(system_dir=None) -> dict:
+    """Flush pending gamelist edits for one system, or all. Returns {flushed, errors}."""
+    flushed, errors = [], {}
+    with _gamelist_lock:
+        for key in ([system_dir] if system_dir else list(_gl_state)):
+            st = _gl_state.get(key)
+            if not st or not st["pending"]:
+                continue
+            err = _gl_flush_locked(key)
+            if err:
+                errors[key] = err
+            else:
+                flushed.append(key)
+    return {"flushed": flushed, "errors": errors}
+
+
+atexit.register(flush_gamelists)
+
+
+def _gl_cache_update(system_dir: str, rom_filename: str, fields: dict) -> None:
+    """Reflect just-written gamelist fields in scan_cache['gamelists'] in place (no re-parse)."""
+    base = os.path.basename(rom_filename)
+    stem = os.path.splitext(base)[0].lower()
+    with _cache_lock:
+        gl = scan_cache.setdefault("gamelists", {}).setdefault(system_dir, {})
+        e = gl.get(stem) or {"path": base, "name": "", "image": None, "image_abs": None,
+                             "image_exists": False, "thumbnail": None, "desc": ""}
+        for key in ("name", "thumbnail", "desc"):
+            if fields.get(key) is not None:
+                e[key] = str(fields[key])
+        if fields.get("image") is not None:
+            e["image"] = str(fields["image"])
+            rel = _strip_dot_slash(e["image"]).replace("\\", "/")
+            if rel and ".." not in rel.split("/") and not os.path.isabs(rel) and ":" not in rel:
+                e["image_abs"] = os.path.join(_roms_root(), system_dir, rel.replace("/", os.sep))
+                e["image_exists"] = os.path.isfile(e["image_abs"])
+            else:
+                e["image_abs"], e["image_exists"] = None, False
+        gl[stem] = e
+
+
+def write_gamelist_entry(system_dir, rom_filename, fields, defer=False):
     """
     Safely merge or insert a <game> entry in gamelist.xml.
     fields may include: name, image, thumbnail, desc, rating.
+    defer=True batches the disk write (see block comment above); the entry is in memory and in
+    scan_cache immediately and is persisted by the next flush.
     Returns {ok, created} — created=True if a new entry was added.
     """
-    # Serialize the read-parse-modify-write so two concurrent writers (e.g. overlapping
-    # scrapes) for the same system can't clobber each other's changes.
     with _gamelist_lock:
-        return _write_gamelist_entry_locked(system_dir, rom_filename, fields)
+        return _write_gamelist_entry_locked(system_dir, rom_filename, fields, defer)
 
 
-_gamelist_bak_done: set = set()   # systems whose gamelist.xml.bak was taken this session
-
-
-def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
+def _write_gamelist_entry_locked(system_dir, rom_filename, fields, defer=False):
     if _bad_sys_file(system_dir, rom_filename):
         return {"ok": False, "error": "invalid_path", "detail": "invalid system or filename"}
-    xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
-    bak_path = xml_path + ".bak"
-    tmp_path = xml_path + ".tmp"
-
-    # Read existing XML or create a minimal tree
-    if os.path.exists(xml_path):
-        try:
-            rec_info: dict = {}
-            tree = _load_gamelist_tree(xml_path, rec_info)
-            root = tree.getroot()
-            if rec_info.get("recoverable"):
-                logger.warning(f"gamelist.xml for {system_dir} had trailing junk; repaired while saving")
-        except ET.ParseError as e:
-            return {"ok": False, "error": "xml_parse_error", "detail": str(e)}
-    else:
-        root = ET.Element("gameList")
-        tree = ET.ElementTree(root)
+    try:
+        st = _gl_tree_for(system_dir)
+    except ET.ParseError as e:
+        return {"ok": False, "error": "xml_parse_error", "detail": str(e)}
+    except OSError as e:
+        return {"ok": False, "error": "read_error", "detail": str(e)}
+    root = st["tree"].getroot()
 
     # Find existing <game> entry (case-insensitive basename match)
     target_basename = os.path.basename(rom_filename).lower()
@@ -3240,38 +3355,36 @@ def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
             if el is None:
                 el = ET.SubElement(found, field_name)
             el.text = str(fields[field_name])
+    st["pending"] += 1
 
-    # Backup once per session per system: this .bak is the pre-session state, a real rollback
-    # point (copying on every write would only ever hold "one write ago" and double the I/O).
-    if os.path.exists(xml_path) and system_dir not in _gamelist_bak_done:
-        try:
-            shutil.copy2(xml_path, bak_path)
-            _gamelist_bak_done.add(system_dir)
-        except OSError:
-            pass  # Non-fatal — proceed without backup
+    if defer and st["pending"] < _GL_FLUSH_EVERY:
+        if st.get("timer"):
+            st["timer"].cancel()
+        timer = threading.Timer(_GL_IDLE_FLUSH_S, _gl_idle_flush, args=(system_dir,))
+        timer.daemon = True
+        timer.start()
+        st["timer"] = timer
+        _gl_cache_update(system_dir, rom_filename, fields)
+        return {"ok": True, "created": created, "deferred": True}
 
-    # Write atomically: tmp then rename
-    try:
-        try:
-            ET.indent(root)
-        except AttributeError:
-            pass  # ET.indent requires Python 3.9+
-        tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
-        os.replace(tmp_path, xml_path)
-    except OSError as e:
-        # Clean up tmp file if it exists
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return {"ok": False, "error": "write_error", "detail": str(e)}
-
-    # Refresh in-memory gamelist cache for this system
-    _gl = parse_gamelist(system_dir)
-    with _cache_lock:
-        scan_cache.setdefault("gamelists", {})[system_dir] = _gl
-
+    err = _gl_flush_locked(system_dir)
+    if err:
+        return {"ok": False, "error": "write_error", "detail": err}
+    _gl_cache_update(system_dir, rom_filename, fields)
     return {"ok": True, "created": created}
+
+
+@app.route("/api/gamelist/flush", methods=["POST"])
+def flush_gamelist_route():
+    """Persist deferred gamelist edits (called by the UI when a bulk scrape ends)."""
+    data = request.get_json(silent=True) or {}
+    system = data.get("system")
+    if system:
+        err = _bad_sys_file(system)
+        if err:
+            return jsonify({"error": err}), 400
+    res = flush_gamelists(system)
+    return jsonify({"ok": not res["errors"], **res})
 
 
 @app.route("/api/gamelist/update", methods=["POST"])
@@ -3305,7 +3418,11 @@ def repair_gamelist():
         return jsonify({"error": err}), 400
     # Same lock as write_gamelist_entry so repair can't interleave with a scrape's write.
     with _gamelist_lock:
-        return _repair_gamelist_locked(system)
+        _gl_flush_locked(system)
+        try:
+            return _repair_gamelist_locked(system)
+        finally:
+            _gl_invalidate(system)
 
 
 def _repair_gamelist_locked(system):
@@ -4069,7 +4186,7 @@ def scrape_cover():
     write_result = write_gamelist_entry(system, filename, {
         "name": game_name or rom_stem,
         "image": image_rel,
-    })
+    }, defer=bool(data.get("defer")))
 
     # Only update the in-memory cache when gamelist.xml was actually written.
     if write_result.get("ok"):
@@ -4107,7 +4224,7 @@ def scrape_description():
     write_result = write_gamelist_entry(system, filename, {
         "name": game_name or rom_stem,
         "desc": result["desc"],
-    })
+    }, defer=bool(data.get("defer")))
 
     # Only update the in-memory cache when gamelist.xml was actually written.
     # If the write failed, leave the cache unchanged so the UI stays honest —

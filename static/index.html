@@ -1241,7 +1241,7 @@ async function scrapeCover(filename, system, gameName) {
   const key = system + '/' + filename;
   state.coverScraping[key] = true;
   render();
-  const r = await api('/covers/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
+  const r = await api('/covers/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '', defer: !!state.scrapingBulk } });
   delete state.coverScraping[key];
   if (r.ok) {
     if (r.gamelist_updated === false) {
@@ -1278,6 +1278,7 @@ async function scrapeCover(filename, system, gameName) {
 async function processScrapeQueue() {
   if (!state.scrapeQueue.length) {
     state.scrapingBulk = false;
+    await api('/gamelist/flush', { method: 'POST', body: {} });   // persist batched gamelist edits
     toast('Bulk scrape complete', 'success');
     render();
     return;
@@ -1298,6 +1299,7 @@ function queueShouldStop(res, kind) {
   if (!res || res.ok || !QUEUE_STOP_ERRORS.includes(res.error)) return false;
   const left = kind === 'cover' ? state.scrapeQueue.length : state.descScrapeQueue.length;
   if (kind === 'cover') state.scrapingBulk = false; else state.descScrapingBulk = false;
+  api('/gamelist/flush', { method: 'POST', body: {} });
   state.scrapeStopped = { kind, error: res.error, remaining: left };
   toast(`Bulk scrape stopped (${res.error.replace('_', ' ')}). ${left} item(s) left in the queue.`, 'error');
   render();
@@ -1337,7 +1339,7 @@ async function scrapeDescription(filename, system, gameName) {
   const key = system + '/' + filename;
   state.descScraping[key] = true;
   render();
-  const r = await api('/descriptions/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '' } });
+  const r = await api('/descriptions/scrape', { method: 'POST', body: { filename, system, game_name: gameName || '', defer: !!state.descScrapingBulk } });
   delete state.descScraping[key];
   if (r.ok) {
     if (r.gamelist_updated === false) {
@@ -1373,6 +1375,7 @@ async function scrapeDescription(filename, system, gameName) {
 async function processScrapeDescQueue() {
   if (!state.descScrapeQueue.length) {
     state.descScrapingBulk = false;
+    await api('/gamelist/flush', { method: 'POST', body: {} });
     toast('Bulk description scrape complete', 'success');
     render();
     return;
