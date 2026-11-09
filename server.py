@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.06.3"
+APP_VERSION = "2026.07.0"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1191,6 +1191,44 @@ def _cover_url_for(system_dir, image_rel):
     return f"/api/covers/image/{urllib.parse.quote(system_dir, safe='')}/{urllib.parse.quote(img_basename, safe='')}"
 
 
+def _save_cover_image(system_key, rom_filename, img_data, ext, source, sanitize_stem=False):
+    """Write downloaded cover bytes to <system>/media/images/<rom_stem><ext>.
+
+    Shared tail of every cover source (ScreenScraper, Libretro, Sega Fandom, user URL):
+    they differ only in how they *obtain* the bytes, never in how they store them.
+    Returns the same {ok, image_path, cover_url, img_filename, source} contract the
+    fetchers return, or {ok: False, error: "write_error"} — never raises.
+
+    sanitize_stem strips characters that are illegal in a Windows filename. Only the
+    user-supplied-URL path sets it, matching that endpoint's existing traversal guard.
+    """
+    rom_stem = os.path.splitext(rom_filename)[0]
+    if sanitize_stem:
+        rom_stem = re.sub(r'[/\\:*?"<>|]', '_', rom_stem)
+    img_filename = rom_stem + ext
+
+    img_dir = os.path.join(_roms_root(), system_key, "media", "images")
+    try:
+        # makedirs is inside the try on purpose: it is the step that fails when the SMB
+        # share drops mid-session, and that must surface as write_error, not a 500.
+        # ValueError covers malformed paths (e.g. an embedded null), which is not an OSError.
+        os.makedirs(img_dir, exist_ok=True)
+        with open(os.path.join(img_dir, img_filename), "wb") as f:
+            f.write(img_data)
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": "write_error", "detail": str(e)}
+
+    img_path = os.path.join(img_dir, img_filename)
+    logger.info(f"[{source}] Saved cover for {rom_filename} -> {img_path}")
+    return {
+        "ok": True,
+        "image_path": img_path,
+        "cover_url": _cover_url_for(system_key, f"./media/images/{img_filename}"),
+        "img_filename": img_filename,
+        "source": source,
+    }
+
+
 def _compute_stats() -> dict:
     """Recompute the stats block from the current scan_cache. Call under _cache_lock.
 
@@ -2047,6 +2085,43 @@ def _remove_diag_from_cache(system: str, diag_key: str, filename: str) -> None:
             break
 
 
+def _apply_scrape_to_cache(system, filename, *, cover_url=None, has_desc=False, game_name=""):
+    """Reflect a successful cover/description scrape in scan_cache.
+
+    Call only after gamelist.xml was actually written, so the in-memory counts never
+    claim metadata that isn't on disk.
+
+    Taken under _cache_lock: these endpoints can run while a background scan is
+    mutating scan_cache, and the totals iterate every system and every ROM. Without
+    the lock that iteration can raise "dictionary changed size during iteration".
+    Totals are delegated to _compute_stats() rather than recomputed inline so a new
+    stat only ever has to be added in one place.
+    """
+    with _cache_lock:
+        sys_info = scan_cache.get("systems", {}).get(system)
+        if sys_info:
+            for rom in sys_info.get("roms", []):
+                if rom["name"] == filename:
+                    if cover_url is not None:
+                        rom["has_cover"] = True
+                        rom["cover_url"] = cover_url
+                    if has_desc:
+                        rom["has_description"] = True
+                    if not rom.get("game_name") and game_name:
+                        rom["game_name"] = game_name
+                    break
+            if cover_url is not None:
+                sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
+            if has_desc:
+                sys_info["description_count"] = sum(
+                    1 for r in sys_info["roms"] if r.get("has_description")
+                )
+        # Only refresh totals if a scan has produced them — a scrape before the first
+        # scan must not invent a stats block the UI would then render as real.
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
+
+
 def _kb_category(key: str) -> str:
     if key in {"missing_bios", "wrong_bios_md5"}:
         return "bios"
@@ -2680,8 +2755,6 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
 
     # Determine extension from URL
     img_ext = os.path.splitext(urllib.parse.urlparse(img_url).path)[1] or ".png"
-    rom_stem = os.path.splitext(rom_filename)[0]
-    img_filename = rom_stem + img_ext
 
     # Download image
     try:
@@ -2690,21 +2763,7 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     except Exception as e:
         return {"ok": False, "error": "timeout", "detail": str(e)}
 
-    # Save to <system>/media/images/<stem><ext>
-    img_dir = os.path.join(_roms_root(), system_key, "media", "images")
-    os.makedirs(img_dir, exist_ok=True)
-    img_path = os.path.join(img_dir, img_filename)
-    try:
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-    except OSError as e:
-        return {"ok": False, "error": "write_error", "detail": str(e)}
-
-    logger.info(f"Saved cover for {rom_filename} -> {img_path}")
-
-    cover_url = _cover_url_for(system_key, f"./media/images/{img_filename}")
-    return {"ok": True, "image_path": img_path, "cover_url": cover_url,
-            "img_filename": img_filename, "source": "screenscraper"}
+    return _save_cover_image(system_key, rom_filename, img_data, img_ext, "screenscraper")
 
 
 def fetch_libretro_cover(system_key, rom_filename, game_name=""):
@@ -2740,21 +2799,7 @@ def fetch_libretro_cover(system_key, rom_filename, game_name=""):
             return {"ok": False, "error": "timeout"}
         return {"ok": False, "error": "libretro_down", "detail": str(e)}
 
-    rom_stem = os.path.splitext(rom_filename)[0]
-    img_filename = rom_stem + ".png"
-    img_dir = os.path.join(_roms_root(), system_key, "media", "images")
-    os.makedirs(img_dir, exist_ok=True)
-    img_path = os.path.join(img_dir, img_filename)
-    try:
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-    except OSError as e:
-        return {"ok": False, "error": "write_error", "detail": str(e)}
-
-    logger.info(f"[Libretro] Saved cover for {rom_filename} -> {img_path}")
-    cover_url = _cover_url_for(system_key, f"./media/images/{img_filename}")
-    return {"ok": True, "image_path": img_path, "cover_url": cover_url,
-            "img_filename": img_filename, "source": "libretro"}
+    return _save_cover_image(system_key, rom_filename, img_data, ".png", "libretro")
 
 
 def _extract_synopsis(jeu, preferred_lang="en"):
@@ -3102,21 +3147,7 @@ def fetch_sega_fandom_cover(system_key, rom_filename, game_name=""):
     else:
         ext = os.path.splitext(urllib.parse.urlparse(img_url).path)[1] or ".png"
 
-    rom_stem = os.path.splitext(rom_filename)[0]
-    img_filename = rom_stem + ext
-    img_dir = os.path.join(_roms_root(), system_key, "media", "images")
-    os.makedirs(img_dir, exist_ok=True)
-    img_path = os.path.join(img_dir, img_filename)
-    try:
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-    except OSError as e:
-        return {"ok": False, "error": "write_error", "detail": str(e)}
-
-    logger.info(f"[Sega Fandom] Saved cover for {rom_filename} -> {img_path}")
-    cover_url = _cover_url_for(system_key, f"./media/images/{img_filename}")
-    return {"ok": True, "image_path": img_path, "cover_url": cover_url,
-            "img_filename": img_filename, "source": "sega_fandom"}
+    return _save_cover_image(system_key, rom_filename, img_data, ext, "sega_fandom")
 
 
 # ---------------------------------------------------------------------------
@@ -3231,25 +3262,7 @@ def scrape_cover():
 
     # Only update the in-memory cache when gamelist.xml was actually written.
     if write_result.get("ok"):
-        sys_info = scan_cache.get("systems", {}).get(system)
-        if sys_info:
-            for rom in sys_info.get("roms", []):
-                if rom["name"] == filename:
-                    rom["has_cover"] = True
-                    rom["cover_url"] = result["cover_url"]
-                    if not rom.get("game_name") and game_name:
-                        rom["game_name"] = game_name
-                    break
-            # Update cover_count on the system
-            sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
-        if scan_cache.get("stats"):
-            scan_cache["stats"]["total_with_covers"] = sum(
-                s.get("cover_count", 0) for s in scan_cache.get("systems", {}).values()
-            )
-            scan_cache["stats"]["total_missing_covers"] = sum(
-                sum(1 for r in s.get("roms", []) if not r.get("has_cover") and r.get("issue") is None)
-                for s in scan_cache.get("systems", {}).values()
-            )
+        _apply_scrape_to_cache(system, filename, cover_url=result["cover_url"], game_name=game_name)
 
     return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
 
@@ -3288,23 +3301,7 @@ def scrape_description():
     # "missing descriptions" count to silently drop during the session but jump
     # back up on the next scan (which re-reads from gamelist.xml).
     if write_result.get("ok"):
-        sys_info = scan_cache.get("systems", {}).get(system)
-        if sys_info:
-            for rom in sys_info.get("roms", []):
-                if rom["name"] == filename:
-                    rom["has_description"] = True
-                    if not rom.get("game_name") and game_name:
-                        rom["game_name"] = game_name
-                    break
-            sys_info["description_count"] = sum(1 for r in sys_info["roms"] if r.get("has_description"))
-        if scan_cache.get("stats"):
-            scan_cache["stats"]["total_with_descriptions"] = sum(
-                s.get("description_count", 0) for s in scan_cache.get("systems", {}).values()
-            )
-            scan_cache["stats"]["total_missing_descriptions"] = sum(
-                sum(1 for r in s.get("roms", []) if not r.get("has_description") and r.get("issue") is None)
-                for s in scan_cache.get("systems", {}).values()
-            )
+        _apply_scrape_to_cache(system, filename, has_desc=True, game_name=game_name)
 
     return jsonify({**result, "gamelist_updated": write_result.get("ok", False)})
 
@@ -3357,27 +3354,17 @@ def download_cover_from_url():
     if not img_ext:
         return jsonify({"ok": False, "error": "invalid_image", "detail": "File does not appear to be a valid image (PNG/JPEG/GIF/WebP)"})
 
-    # Save to <system>/media/images/<rom_stem><ext>
-    rom_stem = os.path.splitext(filename)[0]
-    # Sanitize stem to prevent path traversal
-    rom_stem = re.sub(r'[/\\:*?"<>|]', '_', rom_stem)
-    img_filename = rom_stem + img_ext
-    img_dir = os.path.join(_roms_root(), system, "media", "images")
-    os.makedirs(img_dir, exist_ok=True)
-    img_path = os.path.join(img_dir, img_filename)
+    # Save to <system>/media/images/<rom_stem><ext> — stem is sanitized against traversal
+    saved = _save_cover_image(system, filename, img_data, img_ext, "url", sanitize_stem=True)
+    if not saved["ok"]:
+        return jsonify(saved)
 
-    try:
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-    except OSError as e:
-        return jsonify({"ok": False, "error": "write_error", "detail": str(e)})
-
-    logger.info(f"Downloaded cover from URL for {filename} -> {img_path}")
-
+    img_filename = saved["img_filename"]
     image_rel = f"./media/images/{img_filename}"
-    cover_url = _cover_url_for(system, image_rel)
+    cover_url = saved["cover_url"]
 
     # Get existing game_name from gamelist if available
+    rom_stem = os.path.splitext(img_filename)[0]
     gl = scan_cache.get("gamelists", {}).get(system, {})
     gl_entry = gl.get(rom_stem.lower())
     game_name = gl_entry.get("name", "") if gl_entry else ""
@@ -3389,22 +3376,7 @@ def download_cover_from_url():
 
     # Update in-memory cache
     if write_result.get("ok"):
-        sys_info = scan_cache.get("systems", {}).get(system)
-        if sys_info:
-            for rom in sys_info.get("roms", []):
-                if rom["name"] == filename:
-                    rom["has_cover"] = True
-                    rom["cover_url"] = cover_url
-                    break
-            sys_info["cover_count"] = sum(1 for r in sys_info["roms"] if r.get("has_cover"))
-        if scan_cache.get("stats"):
-            scan_cache["stats"]["total_with_covers"] = sum(
-                s.get("cover_count", 0) for s in scan_cache.get("systems", {}).values()
-            )
-            scan_cache["stats"]["total_missing_covers"] = sum(
-                sum(1 for r in s.get("roms", []) if not r.get("has_cover") and r.get("issue") is None)
-                for s in scan_cache.get("systems", {}).values()
-            )
+        _apply_scrape_to_cache(system, filename, cover_url=cover_url, game_name=game_name)
 
     return jsonify({"ok": True, "cover_url": cover_url, "gamelist_updated": write_result.get("ok", False)})
 

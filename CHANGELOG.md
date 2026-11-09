@@ -2,6 +2,15 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.0 — 2026-07-20
+### Fixed
+- **Scrape endpoints could crash during a background scan** — `/api/covers/scrape`, `/api/descriptions/scrape` and `/api/covers/download-url` updated `scan_cache` and recomputed collection totals *without* holding `_cache_lock`. Because those totals iterate every system and every ROM, a scrape running while a background scan was committing systems could raise `RuntimeError: dictionary changed size during iteration`. All three now mutate the cache under the lock.
+- **Saving a cover from a URL didn't record the game name** — the `/api/covers/download-url` path had drifted from the two scrape paths and never wrote `game_name` into the cached ROM entry, so the browse/search UI could show a filename where the other cover paths showed a title.
+
+### Changed
+- **Deduplicated the scrape write paths** (no behavior change). Extracted `_save_cover_image()` — the identical "write bytes to `<system>/media/images/<stem><ext>`, build the cover URL, return the result contract" tail that was copy-pasted across the ScreenScraper, Libretro, Sega Fandom and user-URL cover sources. Extracted `_apply_scrape_to_cache()` — the post-write cache/stat update that was duplicated three times. Collection totals now delegate to the existing `_compute_stats()` instead of re-deriving two stats inline, so a new stat only has to be added in one place.
+- Per-source error codes (`ss_down`, `libretro_down`, …) were deliberately left un-unified — the UI keys on those exact strings to pick its message.
+
 ## v2026.06.3 — 2026-06-21
 ### Added
 - **Download ROMs catalog** — New "Download ROMs" tab to acquire new games per system straight onto the share. Ships pre-built per-system catalogs (`catalog/<system>.json`) for the top 5 systems (MAME, NES, SNES, Genesis/Megadrive, GBA), generated offline from the archive.org metadata API by `tools/build_catalog.py`. Each game shows a cover (deterministic Libretro thumbnail URL, no pre-download) and lets you download the ROM into `roms/<system>/`, automatically writing a `gamelist.xml` entry with name, and best-effort cover + description (via the existing scrape fallback chain). New endpoints: `GET /api/catalog/systems`, `GET /api/catalog/<system>`, `POST /api/catalog/download`. Already-owned games are flagged against the current scan. Per-item and "download all on this page" (sequential queue) actions with progress.
