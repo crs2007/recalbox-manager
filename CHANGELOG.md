@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.14 — 2026-11-09
+### Fixed
+- **BIOS upload had no size cap and overwrote a good BIOS non-atomically** (#14) — request bodies are capped at 64 MB (JSON 413 on overflow). The upload is streamed to `<name>.upload.tmp` with the MD5 computed on the fly, then swapped in with an atomic `os.replace`; an existing file is first copied to `.bak` (timestamped if a `.bak` already exists). If the existing BIOS already has the correct MD5 and the upload doesn't match, the request is refused with 409 `would_overwrite_good_bios` unless `force=1` (the UI asks for confirmation).
+
 ## v2026.07.13 — 2026-11-09
 ### Security
 - **SSRF guard could be bypassed with redirects or DNS rebinding** (#13) — all outbound fetches now go through `_public_urlopen()`: it resolves the host once, rejects non-public addresses, and connects to that exact IP (pinned, with correct SNI/Host), and every redirect hop is re-validated (http/https only, max 3 hops; catalog downloads may only be redirected within `archive.org`). Environment proxy settings are ignored for these fetches.

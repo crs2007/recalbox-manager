@@ -1181,16 +1181,23 @@ async function fixUploadBios(system, expectedFilename, file) {
   state.fixing[key] = true;
   render();
 
-  const fd = new FormData();
-  fd.append('system', system);
-  fd.append('expected_filename', expectedFilename);
-  fd.append('file', file, expectedFilename);
-
   let r;
   try {
     // Must use raw fetch — api() hardcodes JSON content-type which breaks multipart
-    const resp = await fetch(API + '/fix/upload-bios', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'recalbox-manager' } });
-    r = await resp.json();
+    const send = async (force) => {
+      const fd = new FormData();
+      fd.append('system', system);
+      fd.append('expected_filename', expectedFilename);
+      fd.append('file', file, expectedFilename);
+      if (force) fd.append('force', '1');
+      const resp = await fetch(API + '/fix/upload-bios', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'recalbox-manager' } });
+      return await resp.json();
+    };
+    r = await send(false);
+    if (r.error === 'would_overwrite_good_bios' &&
+        confirm(`${expectedFilename} already has the correct checksum, but this file does not match.\n\nReplace it anyway? (a .bak copy is kept)`)) {
+      r = await send(true);
+    }
   } catch (e) {
     delete state.fixing[key];
     toast('Upload error: ' + e.message, 'error');

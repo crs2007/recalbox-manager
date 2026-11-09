@@ -35,6 +35,8 @@ from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+# BIOS files are KB..low-MB; cap request bodies so a huge upload can't be buffered into RAM.
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 # Scope CORS to localhost only. The UI is served same-origin, so cross-origin access is
 # never needed — a wildcard would let any website the user visits drive the (unauthenticated)
 # API via the browser.
@@ -73,6 +75,11 @@ _CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; "
         "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    return jsonify({"error": "too_large", "detail": "Upload exceeds the 64 MB limit"}), 413
 
 
 @app.after_request
@@ -120,7 +127,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.13"
+APP_VERSION = "2026.07.14"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -2764,24 +2771,61 @@ def fix_upload_bios():
     base_dir = os.path.join(_roms_root(), system) if bios_entry.get("in_roms") else _bios_root()
     os.makedirs(base_dir, exist_ok=True)
     dest_path = os.path.join(base_dir, expected_filename)
+    tmp_path = dest_path + ".upload.tmp"
+    force = request.form.get("force", "") in ("1", "true", "yes")
+
+    # Stream to a temp file next to the destination, hashing as we go.
+    h = hashlib.md5()
+    try:
+        with open(tmp_path, "wb") as fh:
+            while True:
+                chunk = uploaded.stream.read(1 << 20)
+                if not chunk:
+                    break
+                h.update(chunk)
+                fh.write(chunk)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"error": "write_error", "detail": str(e)}), 500
+    actual_md5 = h.hexdigest()
+    expected_md5 = bios_entry.get("md5")
+
+    # Never let a wrong-hash upload replace a BIOS that already has the right hash.
+    if expected_md5 and actual_md5 != expected_md5 and os.path.exists(dest_path) and not force:
+        try:
+            with open(dest_path, "rb") as ef:
+                eh = hashlib.md5()
+                for chunk in iter(lambda: ef.read(1 << 20), b""):
+                    eh.update(chunk)
+            existing_good = eh.hexdigest() == expected_md5
+        except OSError:
+            existing_good = False
+        if existing_good:
+            os.remove(tmp_path)
+            return jsonify({"error": "would_overwrite_good_bios",
+                            "detail": f"{expected_filename} already has the correct MD5; the uploaded file does not match. Re-send with force to replace it."}), 409
 
     try:
-        data = uploaded.read()
+        if os.path.exists(dest_path):
+            bak = dest_path + ".bak"
+            if os.path.exists(bak):
+                bak = f"{dest_path}.{datetime.now().strftime('%Y%m%d-%H%M%S')}.bak"
+            shutil.copy2(dest_path, bak)
+        os.replace(tmp_path, dest_path)   # atomic: a dropped connection never leaves a truncated BIOS
     except OSError as e:
-        return jsonify({"error": "read_error", "detail": str(e)}), 500
-
-    try:
-        with open(dest_path, "wb") as fh:
-            fh.write(data)
-    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return jsonify({"error": "write_error", "detail": str(e)}), 500
 
     # Soft MD5 validation — save succeeds; mismatch is a warning for regional variants
-    expected_md5 = bios_entry.get("md5")
     md5_match = None
     warning = None
     if expected_md5:
-        actual_md5 = hashlib.md5(data).hexdigest()
         md5_match = (actual_md5 == expected_md5)
         if not md5_match:
             warning = (f"Uploaded but MD5 differs from expected — may be wrong region. "
