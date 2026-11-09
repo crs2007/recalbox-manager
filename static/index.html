@@ -1108,6 +1108,10 @@ async function fixGenerateCue(system, filename) {
   render();
 }
 
+function fixM3uFromBtn(btn) {
+  fixGenerateM3u(btn.dataset.system, JSON.parse(btn.dataset.files), btn.dataset.game);
+}
+
 async function fixGenerateM3u(system, relatedFiles, gameName) {
   const key = system + '/m3u/' + gameName;
   state.fixing[key] = true; render();
@@ -2063,7 +2067,8 @@ function renderDiagnostics() {
       const relFiles = d.related_files && d.related_files.length ? d.related_files : [d.file||''];
       const gname = gameName.replace(/\s*\(disc\s*\d+\)/i, '').trim();
       fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"
-        onclick="event.stopPropagation();fixGenerateM3u('${escJs(d.system||'')}',${JSON.stringify(relFiles)},'${escJs(gname)}')"
+        data-system="${escHtml(d.system||'')}" data-files="${escHtml(JSON.stringify(relFiles))}" data-game="${escHtml(gname)}"
+        onclick="event.stopPropagation();fixM3uFromBtn(this)"
         ${isFixing ? 'disabled' : ''}>${isFixing ? '⟳ Fixing…' : '⚡ Auto-Fix'}</button>`;
     } else if (d.key === 'smc_copier_header') {
       fixBtn = `<button class="btn btn-sm btn-success" style="margin-left:auto;flex-shrink:0"

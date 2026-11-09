@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.3"
+APP_VERSION = "2026.07.4"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -913,14 +913,24 @@ def run_rom_diagnostics(
         for df in disc_files:
             base = disc_pattern.sub("", os.path.splitext(df)[0]).strip().lower()
             game_groups[base].append(df)
+        # One playlist entry per disc: prefer chd, then cue, then cdi, and only fall back
+        # to a bare .bin when the disc has nothing else (a .bin is a track, not a disc).
+        _pref = {".chd": 0, ".cue": 1, ".cdi": 2, ".bin": 3}
         for base, discs in game_groups.items():
-            if len(discs) > 1 and base not in m3u_files:
-                representative = sorted(discs)[0]
+            per_disc = {}
+            for df in sorted(discs):
+                dkey = os.path.splitext(df)[0].lower()
+                cur = per_disc.get(dkey)
+                if cur is None or _pref[os.path.splitext(df)[1].lower()] < _pref[os.path.splitext(cur)[1].lower()]:
+                    per_disc[dkey] = df
+            playlist = sorted(per_disc.values())
+            if len(playlist) > 1 and base not in m3u_files:
+                representative = playlist[0]
                 diag = {
                     "key": "missing_m3u",
                     "file": representative,
                     "system": system_key,
-                    "related_files": discs,
+                    "related_files": playlist,
                     **{k: DIAGNOSTIC_SOLUTIONS["missing_m3u"][k] for k in ("title", "description")},
                 }
                 diag_issues.append(diag)
@@ -2304,7 +2314,12 @@ def fix_generate_m3u():
     if system not in CD_SYSTEMS:
         return jsonify({"error": "not_cd_system", "detail": f"{system} is not a CD-ROM system"}), 400
     sys_dir = os.path.join(_roms_root(), system)
-    missing = [f for f in files if not os.path.exists(os.path.join(sys_dir, os.path.basename(f)))]
+    if not isinstance(files, list) or not all(isinstance(f, str) and f and f == os.path.basename(f) and f not in (".", "..") for f in files):
+        return jsonify({"error": "invalid_files", "detail": "files must be plain filenames"}), 400
+    files = list(dict.fromkeys(files))
+    if not isinstance(game_name, str) or game_name != os.path.basename(game_name.replace("\\", "/")):
+        return jsonify({"error": "invalid_game_name"}), 400
+    missing = [f for f in files if not os.path.exists(os.path.join(sys_dir, f))]
     if missing:
         return jsonify({"error": "missing_files", "missing": missing}), 400
     if not game_name and files:

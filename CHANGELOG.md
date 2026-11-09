@@ -2,6 +2,11 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.4 — 2026-11-09
+### Fixed
+- **M3U Auto-Fix button never worked** (#4) — the file list was `JSON.stringify`d inside a double-quoted `onclick`, a syntax error. The data now lives in `data-*` attributes read by `fixM3uFromBtn()`.
+- **Generated playlists listed `.bin` tracks next to `.cue` files** — `missing_m3u` now yields one entry per disc (chd > cue > cdi > bin). `generate-m3u` also rejects non-basename entries and `game_name` containing path separators, and de-duplicates discs.
+
 ## v2026.07.3 — 2026-11-09
 ### Fixed
 - **`missing_cue` flagged valid multi-track Redump / GDI sets and `generate-cue` wrote wrong sheets** (#3) — detection now parses every `.cue` (`FILE "..."`) and `.gdi` in the folder and only flags a `.bin` no sheet references. `generate-cue` reads the CD sync header to pick `MODE1/2352` vs `MODE2/2352`, and refuses (422) audio/headerless files and `(Track N)` files.

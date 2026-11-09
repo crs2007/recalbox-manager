@@ -48,6 +48,13 @@ write(path.join(BASE, 'roms', 'psx', 'MultiTrack.cue'),
 write(path.join(BASE, 'roms', 'psx', 'MultiTrack (Track 1).bin'), Buffer.from('\x00PSX_MULTI_TRACK_1'));
 write(path.join(BASE, 'roms', 'psx', 'MultiTrack (Track 2).bin'), Buffer.from('\x00PSX_MULTI_TRACK_2_AUDIO'));
 
+// PSX: 2-disc set (cue+bin per disc) with no .m3u -> missing_m3u diagnostic
+for (const n of [1, 2]) {
+  write(path.join(BASE, 'roms', 'psx', `TwoDisc (Disc ${n}).cue`),
+    `FILE "TwoDisc (Disc ${n}).bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n`);
+  write(path.join(BASE, 'roms', 'psx', `TwoDisc (Disc ${n}).bin`), Buffer.from(`\x00PSX_TWODISC_${n}`));
+}
+
 // NeoGeo: same content as Sonic.md → triggers duplicate detection
 write(path.join(BASE, 'roms', 'neogeo', 'DupGame.zip'),    SHARED);
 
