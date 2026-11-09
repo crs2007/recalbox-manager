@@ -127,7 +127,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.14"
+APP_VERSION = "2026.07.15"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -3439,6 +3439,45 @@ def fetch_screenscraper_description(system_key, rom_filename, game_name=""):
     return {"ok": True, "desc": desc}
 
 
+def _normalize_title(t: str) -> str:
+    """Normalize a game title for comparison: lowercase, drop (region)/[tag]/(video game)
+    suffixes and punctuation, turn "Legend of Zelda, The" into "the legend of zelda"."""
+    t = (t or "").lower()
+    t = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", t)
+    t = t.replace("&", " and ")
+    t = re.sub(r"[^a-z0-9 ,]", " ", t)
+    m = re.match(r"^(.*?),\s*(the|a|an)\s*$", t.strip())
+    if m:
+        t = f"{m.group(2)} {m.group(1)}"
+    t = re.sub(r"[^a-z0-9 ]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _pick_matching_title(search_name: str, titles) -> str | None:
+    """Return the wiki title that actually matches the game being scraped, or None.
+
+    MediaWiki opensearch returns *related* pages (characters, franchises, lists); writing the
+    first hit into gamelist.xml puts wrong metadata there permanently. Require an exact match
+    after normalization, or a difflib ratio >= 0.85, and prefer the best-scoring title."""
+    import difflib
+    want = _normalize_title(search_name)
+    if not want:
+        return None
+    best, best_score = None, 0.0
+    non_game = re.compile(r"\([^)]*\b(character|characters|series|franchise|comic|comics|film|movie|"
+                          r"tv|television|book|novel|song|soundtrack|console|disambiguation)\b[^)]*\)", re.I)
+    for title in titles or []:
+        if non_game.search(title):
+            continue          # a character/franchise/media page, not the game itself
+        got = _normalize_title(title)
+        if not got:
+            continue
+        score = 1.0 if got == want else difflib.SequenceMatcher(None, want, got).ratio()
+        if score > best_score:
+            best, best_score = title, score
+    return best if best is not None and best_score >= 0.85 else None
+
+
 def fetch_bootleggames_description(rom_filename, game_name=""):
     """
     Fetch game description from Bootleg Games Fandom wiki as a fallback.
@@ -3458,7 +3497,7 @@ def fetch_bootleggames_description(rom_filename, game_name=""):
         + urllib.parse.urlencode({
             "action": "opensearch",
             "search": search_name,
-            "limit": "3",
+            "limit": "5",
             "format": "json",
         })
     )
@@ -3472,10 +3511,9 @@ def fetch_bootleggames_description(rom_filename, game_name=""):
 
     # opensearch response: [query, [titles], [descriptions], [urls]]
     titles = search_data[1] if len(search_data) > 1 else []
-    if not titles:
+    page_title = _pick_matching_title(search_name, titles)
+    if not page_title:
         return {"ok": False, "error": "not_found"}
-
-    page_title = titles[0]
 
     # Step 2: fetch plain-text intro extract for the page
     extract_url = (
@@ -3529,7 +3567,7 @@ def _sega_fandom_search(search_name):
         + urllib.parse.urlencode({
             "action": "opensearch",
             "search": search_name,
-            "limit": "3",
+            "limit": "5",
             "format": "json",
         })
     )
@@ -3538,7 +3576,7 @@ def _sega_fandom_search(search_name):
     ) as resp:
         search_data = json.loads(resp.read().decode("utf-8", errors="replace"))
     titles = search_data[1] if len(search_data) > 1 else []
-    return titles[0] if titles else None
+    return _pick_matching_title(search_name, titles)
 
 
 def fetch_sega_fandom_description(rom_filename, game_name=""):
@@ -3737,7 +3775,9 @@ SCRAPE_SOURCES = [
         "name": "Bootleg Games Wiki",
         "desc_fn": fetch_bootleggames_description,
         "types": {"desc"},
-        "systems": None,
+        # Bootleg/unlicensed clones only exist for these platforms; on anything else a hit
+        # is almost certainly a different game.
+        "systems": {"nes", "famicom", "megadrive", "gb", "gbc", "snes"},
     },
 ]
 

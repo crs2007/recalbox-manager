@@ -2,6 +2,11 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.15 — 2026-11-09
+### Fixed
+- **Fallback scrapers wrote the first wiki search hit with no relevance check** (#15) — Sega Fandom (cover + description) and Bootleg Games Wiki now fetch up to 5 `opensearch` results and only accept a title that matches the game after normalization (case, region/revision tags, punctuation, "Name, The" ordering) with an exact match or `difflib` ratio ≥ 0.85; otherwise `not_found` and the chain moves on. Bootleg Games Wiki is limited to the platforms that actually have bootlegs (`nes`, `famicom`, `megadrive`, `gb`, `gbc`, `snes`) instead of all systems.
+- Not yet done from the issue: recording the metadata source in `gamelist.xml` and a preview/accept step for low-confidence matches.
+
 ## v2026.07.14 — 2026-11-09
 ### Fixed
 - **BIOS upload had no size cap and overwrote a good BIOS non-atomically** (#14) — request bodies are capped at 64 MB (JSON 413 on overflow). The upload is streamed to `<name>.upload.tmp` with the MD5 computed on the fly, then swapped in with an atomic `os.replace`; an existing file is first copied to `.bak` (timestamped if a `.bak` already exists). If the existing BIOS already has the correct MD5 and the upload doesn't match, the request is refused with 409 `would_overwrite_good_bios` unless `force=1` (the UI asks for confirmation).
