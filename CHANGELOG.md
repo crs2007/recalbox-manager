@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.10 — 2026-11-09
+### Security
+- **Path traversal / arbitrary file write via unvalidated `system` / `filename` / `game_name`** (#10) — new `_bad_sys_file()` validator (plain folder name that is a known system or scanned folder; filename must be a bare basename; no separators, drive letters, NUL or dot-dot) is applied to `/api/gamelist/update`, `/api/gamelist/repair`, `/api/covers/scrape`, `/api/descriptions/scrape` and `/api/covers/download-url`, and defensively inside `_save_cover_image()` and the gamelist writer. `generate-m3u` rejects `game_name` with illegal path characters, and `/api/config` rejects non-string ScreenScraper credentials instead of crashing.
+
 ## v2026.07.9 — 2026-11-09
 ### Fixed
 - **A scan wiped the previous results first, so an SMB drop left a partial inventory** (#9) — Phase 1 now builds the new inventory in a pending namespace (streamed to the UI through `/api/scan/progress`) and swaps it into `scan_cache` only when complete. A failed scan keeps the previous good cache and reports `phase:"error"` with `stale:true`; the UI reloads and keeps showing the old results. Any `OSError` while reading one folder (not just `PermissionError`) is now recorded as a `scan_error` issue and the scan continues with the next system.

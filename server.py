@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.9"
+APP_VERSION = "2026.07.10"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1273,9 +1273,11 @@ def _save_cover_image(system_key, rom_filename, img_data, ext, source, sanitize_
     sanitize_stem strips characters that are illegal in a Windows filename. Only the
     user-supplied-URL path sets it, matching that endpoint's existing traversal guard.
     """
+    if _bad_sys_file(system_key, os.path.basename(rom_filename)):
+        return {"ok": False, "error": "write_error", "detail": "invalid system or filename"}
     rom_stem = os.path.splitext(rom_filename)[0]
-    if sanitize_stem:
-        rom_stem = re.sub(r'[/\\:*?"<>|]', '_', rom_stem)
+    # Always strip separators / illegal filename characters from the stem, not just for URLs.
+    rom_stem = re.sub(r'[/\\:*?"<>|]', '_', rom_stem)
     img_filename = rom_stem + ext
 
     img_dir = os.path.join(_roms_root(), system_key, "media", "images")
@@ -1806,6 +1808,8 @@ def set_config():
     ss_changed = False
     for key in ("screenscraper_user", "screenscraper_pass", "screenscraper_devid", "screenscraper_devpass"):
         if key in data:
+            if not isinstance(data[key], str):
+                return jsonify({"error": f"{key} must be a string"}), 400
             ss_config[key] = data[key]
             ss_changed = True
     if ss_changed:
@@ -1933,6 +1937,29 @@ def _diag_counts():
     with _cache_lock:
         systems = scan_cache.get("systems", {})
         return sum(len(si.get("diagnostic_issues", [])) for si in systems.values()), len(systems)
+
+
+def _bad_sys_file(system, filename=None):
+    """Validate a client-supplied system folder (and optional ROM filename).
+
+    Returns an error string, or None if both are safe. `system` must be a plain folder name
+    that is either a known Recalbox system or a folder the last scan found; `filename` must be
+    a bare basename. os.path.join discards its left side when the right side is absolute
+    (e.g. "C:\\x"), so anything with a separator, drive, or dot-dot is rejected outright.
+    """
+    if not isinstance(system, str) or not system or system in (".", "..") \
+            or any(c in system for c in '/\\:\x00') or system != os.path.basename(system):
+        return f"Invalid system: {system!r}"
+    with _cache_lock:
+        known_folder = system in scan_cache.get("systems", {})
+    if system not in VALID_SYSTEMS and not known_folder:
+        return f"Invalid system: {system!r}"
+    if filename is not None:
+        if not isinstance(filename, str) or filename in ("", ".", "..") \
+                or filename != os.path.basename(filename) or any(c in filename for c in '/\\\x00') \
+                or ":" in filename:
+            return "Invalid filename"
+    return None
 
 
 def _trash_file(system, filename, src_path):
@@ -2482,7 +2509,8 @@ def fix_generate_m3u():
     if not isinstance(files, list) or not all(isinstance(f, str) and f and f == os.path.basename(f) and f not in (".", "..") for f in files):
         return jsonify({"error": "invalid_files", "detail": "files must be plain filenames"}), 400
     files = list(dict.fromkeys(files))
-    if not isinstance(game_name, str) or game_name != os.path.basename(game_name.replace("\\", "/")):
+    if not isinstance(game_name, str) or game_name != os.path.basename(game_name.replace("\\", "/")) \
+            or re.search(r'[:*?"<>|\x00]', game_name) or game_name in (".", ".."):
         return jsonify({"error": "invalid_game_name"}), 400
     missing = [f for f in files if not os.path.exists(os.path.join(sys_dir, f))]
     if missing:
@@ -2801,6 +2829,8 @@ def write_gamelist_entry(system_dir, rom_filename, fields):
 
 
 def _write_gamelist_entry_locked(system_dir, rom_filename, fields):
+    if _bad_sys_file(system_dir, rom_filename):
+        return {"ok": False, "error": "invalid_path", "detail": "invalid system or filename"}
     xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
     bak_path = xml_path + ".bak"
     tmp_path = xml_path + ".tmp"
@@ -2880,6 +2910,9 @@ def update_gamelist():
     filename = data.get("filename")
     if not system or not filename:
         return jsonify({"error": "Missing system or filename"}), 400
+    err = _bad_sys_file(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
     fields = {k: data.get(k) for k in ("name", "image", "thumbnail", "desc", "rating")}
     result = write_gamelist_entry(system, filename, fields)
     return jsonify(result)
@@ -2895,6 +2928,9 @@ def repair_gamelist():
     system = data.get("system")
     if not system:
         return jsonify({"error": "Missing system"}), 400
+    err = _bad_sys_file(system)
+    if err:
+        return jsonify({"error": err}), 400
 
     xml_path = os.path.join(_roms_root(), system, "gamelist.xml")
     if not os.path.exists(xml_path):
@@ -3584,6 +3620,9 @@ def scrape_cover():
 
     if not filename or not system:
         return jsonify({"error": "Missing filename or system"}), 400
+    err = _bad_sys_file(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
 
     result = _run_fallback_chain("cover", system, filename, game_name)
 
@@ -3624,6 +3663,9 @@ def scrape_description():
 
     if not filename or not system:
         return jsonify({"error": "Missing filename or system"}), 400
+    err = _bad_sys_file(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
 
     result = _run_fallback_chain("desc", system, filename, game_name)
 
@@ -3663,6 +3705,9 @@ def download_cover_from_url():
 
     if not system or not filename:
         return jsonify({"error": "Missing system or filename"}), 400
+    err = _bad_sys_file(system, filename)
+    if err:
+        return jsonify({"error": err}), 400
     if not image_url:
         return jsonify({"error": "Missing image_url"}), 400
 
