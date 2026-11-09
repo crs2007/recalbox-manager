@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.5"
+APP_VERSION = "2026.07.6"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1240,6 +1240,19 @@ def _cover_url_for(system_dir, image_rel):
     # image_rel is like ./media/images/game.png — get just the filename
     img_basename = os.path.basename(image_rel.replace("\\", "/"))
     return f"/api/covers/image/{urllib.parse.quote(system_dir, safe='')}/{urllib.parse.quote(img_basename, safe='')}"
+
+
+def _sniff_image_ext(data: bytes) -> str | None:
+    """Return the file extension for PNG/JPEG/GIF/WebP by magic bytes, else None."""
+    if data[:4] == b"\x89PNG":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:4] == b"GIF8":
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def _save_cover_image(system_key, rom_filename, img_data, ext, source, sanitize_stem=False):
@@ -2902,9 +2915,6 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
     if not img_url:
         return {"ok": False, "error": "not_found"}
 
-    # Determine extension from URL
-    img_ext = os.path.splitext(urllib.parse.urlparse(img_url).path)[1] or ".png"
-
     # Download image
     try:
         with urllib.request.urlopen(img_url, timeout=15) as img_resp:
@@ -2919,6 +2929,15 @@ def fetch_screenscraper_cover(system_key, rom_filename, game_name=""):
         return {"ok": False, "error": "timeout"}
     except OSError as e:
         return {"ok": False, "error": "ss_down", "detail": str(e)}
+
+    # The media URL path ends in "mediaJeu.php", so the extension must come from the bytes.
+    # SS also answers quota/errors with a text body and HTTP 200 — reject anything non-image.
+    img_ext = _sniff_image_ext(img_data)
+    if not img_ext:
+        head = img_data[:80].decode("utf-8", errors="replace").lower()
+        if "maximum" in head or "quota" in head or "limit" in head:
+            return {"ok": False, "error": "rate_limited"}
+        return {"ok": False, "error": "not_found", "detail": "response was not an image"}
 
     return _save_cover_image(system_key, rom_filename, img_data, img_ext, "screenscraper")
 
@@ -3514,17 +3533,7 @@ def download_cover_from_url():
         return jsonify({"ok": False, "error": "download_failed", "detail": str(e)})
 
     # Validate image magic bytes
-    MAGIC = {
-        b"\x89PNG": ".png",
-        b"\xff\xd8\xff": ".jpg",
-        b"GIF8": ".gif",
-        b"RIFF": ".webp",
-    }
-    img_ext = None
-    for magic, ext in MAGIC.items():
-        if img_data[:len(magic)] == magic:
-            img_ext = ext
-            break
+    img_ext = _sniff_image_ext(img_data)
     if not img_ext:
         return jsonify({"ok": False, "error": "invalid_image", "detail": "File does not appear to be a valid image (PNG/JPEG/GIF/WebP)"})
 

@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.6 — 2026-11-09
+### Fixed
+- **ScreenScraper covers were saved with a `.php` extension** (#6) — the extension came from the media URL path (`mediaJeu.php`). It is now sniffed from the image bytes via the shared `_sniff_image_ext()` (also used by `/api/covers/download-url`, and now checks the `WEBP` tag), and non-image responses (text quota errors returned with HTTP 200) are rejected. Existing `.php` covers from earlier versions are not migrated automatically — re-scrape or rename them.
+
 ## v2026.07.5 — 2026-11-09
 ### Fixed
 - **Scrape sources broke their "never raises" contract** (#5) — `_run_fallback_chain` now contains timeouts and unexpected exceptions per source (`timeout` / `source_error`) instead of returning a 500. `timeout` and `source_error` now fall through to the next source; `rate_limited` still stops the chain. ScreenScraper: read timeouts and non-numeric quota fields are handled, and image-download failures are classified (404/oversize → `not_found`, timeout → `timeout`) instead of all being reported as `timeout`, which used to stop the chain before Libretro. The frontend `api()` helper now reports the HTTP status when the response isn't JSON instead of "Unexpected token <".
