@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.18 — 2026-11-09
+### Fixed
+- **Moving a ROM left its metadata and cover behind** (#18) — `/api/move` and `/api/bulk-move` now carry the ROM's `gamelist.xml` `<game>` entry (name, description, rating…) and its cover/thumbnail/marquee/video files to the destination system: the entry is removed from the source gamelist and inserted into the destination's, media files are renamed across the share (never overwriting; a numeric suffix is added on collision) and the `<image>` paths are rewritten. If the destination already has an entry, the source entry is just dropped. The cache flags (`has_cover`, `has_description`, `cover_url`, counters) are refreshed so the ROM doesn't reappear under Missing Covers/Descriptions. The response includes a `metadata` summary.
+
 ## v2026.07.17 — 2026-11-09
 ### Fixed
 - **Gamelist writer rejected gamelists the reader could recover; repair raced it; `.bak` was useless** (#17) — new shared `_load_gamelist_tree()` is used by both the reader and the writer, so a gamelist with trailing junk after `</gameList>` is repaired on the fly while saving instead of failing every scrape with `xml_parse_error`. `/api/gamelist/repair` now runs under `_gamelist_lock` (the same lock as `write_gamelist_entry`). `gamelist.xml.bak` is written once per session per system (the pre-session state — a real rollback point) instead of on every write, halving SMB write I/O. `lstrip("./")` (which strips *characters*) is replaced by `_strip_dot_slash()` (prefix only), so names like `.hack//G.U.` are no longer mangled, and `<image>` paths with `..` or absolute components are no longer resolved.

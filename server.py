@@ -128,7 +128,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.17"
+APP_VERSION = "2026.07.18"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -2147,6 +2147,148 @@ def _trash_file(system, filename, src_path):
     return candidate
 
 
+def _save_gamelist_tree(system_dir: str, tree) -> str | None:
+    """Atomically write a gamelist tree (tmp + os.replace), taking the once-per-session .bak.
+    Returns None on success or an error string. Call under _gamelist_lock."""
+    xml_path = os.path.join(_roms_root(), system_dir, "gamelist.xml")
+    tmp_path = xml_path + ".tmp"
+    try:
+        if os.path.exists(xml_path) and system_dir not in _gamelist_bak_done:
+            try:
+                shutil.copy2(xml_path, xml_path + ".bak")
+                _gamelist_bak_done.add(system_dir)
+            except OSError:
+                pass
+        try:
+            ET.indent(tree.getroot())
+        except AttributeError:
+            pass
+        tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp_path, xml_path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return str(e)
+    return None
+
+
+def _free_name(directory: str, name: str) -> str:
+    """name, or name with a numeric suffix if it already exists in directory (never overwrite)."""
+    stem, ext = os.path.splitext(name)
+    candidate, n = name, 0
+    while os.path.lexists(os.path.join(directory, candidate)):
+        n += 1
+        candidate = f"{stem}.{n}{ext}"
+    return candidate
+
+
+def _move_rom_metadata(src_system: str, dst_system: str, filename: str) -> dict:
+    """After a ROM file moved src -> dst, carry its gamelist <game> entry and cover/thumbnail
+    files along (instead of orphaning them in the old system and leaving the ROM bare in the
+    new one). If the destination already has an entry for the ROM, the source entry is simply
+    dropped. Never overwrites existing files. Returns {moved_entry, moved_media, error?}."""
+    result = {"moved_entry": False, "moved_media": 0}
+    target = os.path.basename(filename).lower()
+    stem = os.path.splitext(filename)[0].lower()
+    src_dir = os.path.join(_roms_root(), src_system)
+    dst_dir = os.path.join(_roms_root(), dst_system)
+    with _gamelist_lock:
+        src_xml = os.path.join(src_dir, "gamelist.xml")
+        if not os.path.exists(src_xml):
+            return result
+        try:
+            src_tree = _load_gamelist_tree(src_xml)
+        except (ET.ParseError, OSError) as e:
+            return {**result, "error": f"source gamelist unreadable: {e}"}
+        src_root = src_tree.getroot()
+        entry = None
+        for game in src_root.findall("game"):
+            p = game.find("path")
+            if p is not None and p.text and os.path.basename(
+                    _strip_dot_slash(p.text).replace("\\", "/")).lower() == target:
+                entry = game
+                break
+        if entry is None:
+            return result
+
+        # Media referenced by the entry (image / thumbnail / marquee / video) that lives inside
+        # the source system folder. Copy-then-rename isn't needed: same share, so os.replace.
+        moved_media = 0
+        for tag in ("image", "thumbnail", "marquee", "video"):
+            el = entry.find(tag)
+            if el is None or not el.text:
+                continue
+            rel = _strip_dot_slash(el.text).replace("\\", "/")
+            if not rel or ".." in rel.split("/") or os.path.isabs(rel) or ":" in rel:
+                continue
+            src_file = os.path.join(src_dir, rel.replace("/", os.sep))
+            if not os.path.isfile(src_file):
+                continue
+            dst_rel_dir = os.path.dirname(rel.replace("/", os.sep))
+            dst_media_dir = os.path.join(dst_dir, dst_rel_dir)
+            try:
+                os.makedirs(dst_media_dir, exist_ok=True)
+                new_name = _free_name(dst_media_dir, os.path.basename(src_file))
+                os.rename(src_file, os.path.join(dst_media_dir, new_name))
+                el.text = "./" + (dst_rel_dir.replace(os.sep, "/") + "/" if dst_rel_dir else "") + new_name
+                moved_media += 1
+            except OSError as e:
+                logger.warning(f"Could not move {src_file} to {dst_system}: {e}")
+        result["moved_media"] = moved_media
+
+        # Remove from the source gamelist.
+        src_root.remove(entry)
+        err = _save_gamelist_tree(src_system, src_tree)
+        if err:
+            return {**result, "error": f"could not update source gamelist: {err}"}
+
+        # Insert into the destination gamelist unless it already has this ROM.
+        dst_xml = os.path.join(dst_dir, "gamelist.xml")
+        try:
+            if os.path.exists(dst_xml):
+                dst_tree = _load_gamelist_tree(dst_xml)
+            else:
+                dst_tree = ET.ElementTree(ET.Element("gameList"))
+        except (ET.ParseError, OSError) as e:
+            return {**result, "error": f"destination gamelist unreadable: {e}"}
+        dst_root = dst_tree.getroot()
+        exists = any(
+            (g.find("path") is not None and g.find("path").text and os.path.basename(
+                _strip_dot_slash(g.find("path").text).replace("\\", "/")).lower() == target)
+            for g in dst_root.findall("game"))
+        if not exists:
+            entry.find("path").text = "./" + os.path.basename(filename)
+            dst_root.append(entry)
+            err = _save_gamelist_tree(dst_system, dst_tree)
+            if err:
+                return {**result, "error": f"could not update destination gamelist: {err}"}
+            result["moved_entry"] = True
+
+    # Refresh in-memory gamelists, and the moved ROM's metadata flags in the cache.
+    gl_src, gl_dst = parse_gamelist(src_system), parse_gamelist(dst_system)
+    with _cache_lock:
+        gls = scan_cache.setdefault("gamelists", {})
+        gls[src_system], gls[dst_system] = gl_src, gl_dst
+        sys_info = scan_cache.get("systems", {}).get(dst_system)
+        gl_entry = gl_dst.get(os.path.splitext(filename)[0].lower())
+        if sys_info and gl_entry:
+            for rom in sys_info.get("roms", []):
+                if rom.get("name") == filename:
+                    rom["game_name"] = gl_entry["name"]
+                    rom["has_metadata"] = True
+                    rom["has_cover"] = gl_entry["image_exists"]
+                    rom["cover_url"] = (_cover_url_for(dst_system, gl_entry["image"])
+                                        if gl_entry.get("image_exists") else None)
+                    rom["has_description"] = bool(gl_entry.get("desc"))
+                    break
+            _recount_system(sys_info)
+        if scan_cache.get("stats"):
+            scan_cache["stats"] = _compute_stats()
+    return result
+
+
 @app.route("/api/duplicates/trash", methods=["POST"])
 def trash_duplicate():
     """Trash one copy of a duplicate group after re-verifying it is byte-identical to the kept copy.
@@ -2237,7 +2379,9 @@ def move_rom():
         shutil.move(src_path, dst_path)
         logger.info(f"Moved {filename}: {src_system} -> {dst_system}")
         _cache_move_rom(src_system, dst_system, filename, dst_path)
-        return jsonify({"ok": True, "moved": {"file": filename, "from": src_system, "to": dst_system}})
+        meta = _move_rom_metadata(src_system, dst_system, filename)
+        return jsonify({"ok": True, "moved": {"file": filename, "from": src_system, "to": dst_system},
+                        "metadata": meta})
     except (OSError, shutil.Error) as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2305,7 +2449,8 @@ def bulk_move():
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.move(src, dst)
                 _cache_move_rom(from_system, to_system, filename, dst)
-                results.append({"file": filename, "status": "moved"})
+                meta = _move_rom_metadata(from_system, to_system, filename)
+                results.append({"file": filename, "status": "moved", "metadata": meta})
             elif os.path.exists(src) and os.path.exists(dst):
                 if files_identical(src, dst):
                     trash_path = _trash_file(from_system, filename, src)
