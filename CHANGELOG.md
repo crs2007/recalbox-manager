@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.1 — 2026-11-09
+### Fixed
+- **Safe delete could silently overwrite an earlier trashed file** (#1) — `/api/delete`, `/api/move` (trashed duplicate) and `/api/bulk-move` used `shutil.move`, which on Windows falls back to copy-over when the target exists. All three now go through `_trash_file()`, which adds a `.YYYYmmdd-HHMMSS[.n]` suffix on collision, uses atomic `os.rename`, and returns `trash_path` in the JSON.
+
 ## v2026.07.0 — 2026-07-20
 ### Fixed
 - **Scrape endpoints could crash during a background scan** — `/api/covers/scrape`, `/api/descriptions/scrape` and `/api/covers/download-url` updated `scan_cache` and recomputed collection totals *without* holding `_cache_lock`. Because those totals iterate every system and every ROM, a scrape running while a background scan was committing systems could raise `RuntimeError: dictionary changed size during iteration`. All three now mutate the cache under the lock.

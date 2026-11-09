@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.0"
+APP_VERSION = "2026.07.1"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -1796,6 +1796,29 @@ def list_duplicates():
     return jsonify(scan_cache.get("duplicates", []))
 
 
+def _trash_file(system, filename, src_path):
+    """Move src_path into _trash/<system>/ without ever overwriting an earlier trashed file.
+
+    If _trash/<system>/<filename> already exists, a timestamp (and counter) suffix is added:
+    <stem>.<YYYYmmdd-HHMMSS>[.<n>]<ext>. Uses os.rename (same share, atomic) and never falls
+    back to shutil's copy-over. Returns the final trash path; raises OSError on failure.
+    """
+    trash_dir = os.path.join(_roms_root(), "_trash", system)
+    os.makedirs(trash_dir, exist_ok=True)
+    stem, ext = os.path.splitext(filename)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = os.path.join(trash_dir, filename)
+    n = 0
+    while os.path.lexists(candidate):
+        n += 1
+        suffix = stamp if n == 1 else f"{stamp}.{n - 1}"
+        candidate = os.path.join(trash_dir, f"{stem}.{suffix}{ext}")
+        if n > 1000:
+            raise OSError(f"Cannot find a free trash name for {filename}")
+    os.rename(src_path, candidate)
+    return candidate
+
+
 @app.route("/api/move", methods=["POST"])
 def move_rom():
     """Move a ROM file from one system folder to another.
@@ -1836,15 +1859,17 @@ def move_rom():
         if files_identical(src_path, dst_path):
             # Identical content (size + full-file compare) — trash the misplaced source,
             # destination already correct.
-            trash_dir = os.path.join(_roms_root(), "_trash", src_system)
-            os.makedirs(trash_dir, exist_ok=True)
-            shutil.move(src_path, os.path.join(trash_dir, filename))
+            try:
+                trash_path = _trash_file(src_system, filename, src_path)
+            except OSError as e:
+                return jsonify({"error": str(e)}), 500
             logger.info(f"Trashed misplaced duplicate {filename} from {src_system} (identical copy already in {dst_system})")
             return jsonify({
                 "ok": True,
                 "action": "trashed_duplicate",
                 "message": f"Identical copy already exists in {dst_system} — misplaced file removed.",
                 "moved": {"file": filename, "from": src_system, "to": dst_system},
+                "trash_path": trash_path,
             })
         return jsonify({"error": f"File already exists in {dst_system} (different content)"}), 409
 
@@ -1880,15 +1905,11 @@ def delete_rom():
         return jsonify({"error": "File not found"}), 404
 
     # Move to trash instead of deleting
-    trash_dir = os.path.join(_roms_root(), "_trash", system)
-    os.makedirs(trash_dir, exist_ok=True)
-    trash_path = os.path.join(trash_dir, filename)
-
     try:
-        shutil.move(src_path, trash_path)
-        logger.info(f"Trashed {filename} from {system}")
-        return jsonify({"ok": True, "trashed": {"file": filename, "system": system}})
-    except (OSError, shutil.Error) as e:
+        trash_path = _trash_file(system, filename, src_path)
+        logger.info(f"Trashed {filename} from {system} -> {trash_path}")
+        return jsonify({"ok": True, "trashed": {"file": filename, "system": system}, "trash_path": trash_path})
+    except OSError as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -1926,10 +1947,8 @@ def bulk_move():
                 results.append({"file": filename, "status": "moved"})
             elif os.path.exists(src) and os.path.exists(dst):
                 if files_identical(src, dst):
-                    trash_dir = os.path.join(_roms_root(), "_trash", from_system)
-                    os.makedirs(trash_dir, exist_ok=True)
-                    shutil.move(src, os.path.join(trash_dir, filename))
-                    results.append({"file": filename, "status": "trashed_duplicate"})
+                    trash_path = _trash_file(from_system, filename, src)
+                    results.append({"file": filename, "status": "trashed_duplicate", "trash_path": trash_path})
                 else:
                     results.append({"file": filename, "status": "skipped", "reason": "different content"})
             else:
