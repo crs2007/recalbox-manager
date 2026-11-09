@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.12 — 2026-11-09
+### Security
+- **Stored XSS through game names, filenames and folder names** (#12) — `escJs()` only escaped for a JS string, but its output lives in HTML attributes, so a `"` still ended the attribute. It now JS-escapes *then* HTML-escapes, and a new `escAttrJson()` fully escapes the JSON passed to the edit/move modals (previously a `&quot;` in a name could decode back into a quote and break out). Raw `s.folder` / `r.system` / `m.system` / browse `key` interpolations in handlers, `data-*` attributes and text are now escaped. A Content-Security-Policy (no remote scripts, `connect-src 'self'`, `frame-ancestors 'none'`) and `X-Content-Type-Options: nosniff` are sent on every response; `script-src` keeps `'unsafe-inline'` until the inline handlers are replaced by delegated listeners.
+
 ## v2026.07.11 — 2026-11-09
 ### Security
 - **No Host/Origin check: DNS rebinding and CSRF could drive the API** (#11) — a `before_request` guard now rejects any request whose `Host` is not `localhost`, an IP literal, or listed in `RECALBOX_ALLOWED_HOSTS` (defeats DNS rebinding), rejects mutating requests whose `Origin` doesn't match `Host`, and requires an `X-Requested-With: recalbox-manager` header on every non-GET request (the UI and the Playwright config send it; a cross-site page can't without a preflight). Changing `share_path` to a UNC path on a *different host* now needs explicit confirmation (`confirm_host_change`) so a forged request can't silently leak NTLM credentials to another machine.

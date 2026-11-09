@@ -1639,7 +1639,7 @@ function renderSystems() {
   </div>
   <div class="systems-grid">
     ${entries.map(([key, s]) => `
-      <div class="system-card ${s.misplaced_count > 0 ? 'has-issues' : ''}" data-system="${key}">
+      <div class="system-card ${s.misplaced_count > 0 ? 'has-issues' : ''}" data-system="${escHtml(key)}">
         <div class="sys-name">${escHtml(s.name)}</div>
         <div class="sys-folder">/${escHtml(s.folder)}</div>
         <div class="sys-stats">
@@ -1683,7 +1683,7 @@ function renderSystemDetail() {
     <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">
       <input type="text" id="romFilter" placeholder="Filter ROMs..." value="${escHtml(state.romFilter)}"
         style="flex:1;min-width:200px;padding:8px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem" />
-      ${s.misplaced_count > 0 ? `<button class="btn btn-success btn-sm" onclick="bulkFixMisplaced('${s.folder}')">⚡ Auto-fix ${s.misplaced_count} misplaced</button>` : ''}
+      ${s.misplaced_count > 0 ? `<button class="btn btn-success btn-sm" onclick="bulkFixMisplaced('${escJs(s.folder)}')">⚡ Auto-fix ${s.misplaced_count} misplaced</button>` : ''}
       <span style="font-size:0.75rem;color:var(--text-dim)">
         Valid: ${s.valid_extensions?.join(', ') || 'any'}
       </span>
@@ -1725,13 +1725,13 @@ function renderSystemDetail() {
               </td>
               <td style="text-align:center">${descCell}</td>
               <td>
-                ${isRomFile ? `<button class="btn btn-sm" onclick='showEditModal(${JSON.stringify(r).replace(/\x27/g,"&#39;")}, "${escJs(s.folder)}")' title="Edit metadata">✏️</button>` : ''}
-                ${r.suggested_systems?.length ? `<button class="btn btn-sm btn-success" onclick='showMoveModal(${JSON.stringify(r).replace(/'/g,"&#39;")})'>Move →</button>` : ''}
+                ${isRomFile ? `<button class="btn btn-sm" onclick='showEditModal(${escAttrJson(r)}, "${escJs(s.folder)}")' title="Edit metadata">✏️</button>` : ''}
+                ${r.suggested_systems?.length ? `<button class="btn btn-sm btn-success" onclick='showMoveModal(${escAttrJson(r)})'>Move →</button>` : ''}
                 ${isRomFile ? `<button class="btn btn-sm" onclick="scrapeCover('${escJs(r.name)}','${escJs(s.folder)}','${escJs(r.game_name||'')}')"
                   ${isScraping ? 'disabled' : ''} title="${r.has_cover ? 'Re-scrape cover' : 'Fetch cover art'}">
                   ${isScraping ? '⟳' : '🖼'}
                 </button>` : ''}
-                <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${s.folder}')">🗑</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${escJs(s.folder)}')">🗑</button>
               </td>
             </tr>`;
           }).join('')}
@@ -1768,7 +1768,7 @@ function renderIssues() {
           <div class="issue-actions">
             ${i.suggested_systems.length === 1
               ? `<button class="btn btn-sm btn-success" onclick="moveRom('${escJs(i.file)}','${escJs(i.current_system)}','${escJs(i.suggested_systems[0])}')">Move → ${escHtml(i.suggested_systems[0])}</button>`
-              : `<button class="btn btn-sm" onclick='showMoveModal(${JSON.stringify({name:i.file,system:i.current_system,suggested_systems:i.suggested_systems}).replace(/\x27/g,"&#39;")})'>Choose system…</button>`}
+              : `<button class="btn btn-sm" onclick='showMoveModal(${escAttrJson({name:i.file,system:i.current_system,suggested_systems:i.suggested_systems})})'>Choose system…</button>`}
             <button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(i.file)}','${escJs(i.current_system)}')" title="Move to trash">🗑</button>
           </div>
         </div>`;
@@ -2433,11 +2433,11 @@ function renderSearch() {
           <tbody>
             ${state.searchResults.map(r => `<tr>
               <td class="rom-name">${escHtml(r.name)}</td>
-              <td><span style="color:var(--purple)">${r.system}</span></td>
+              <td><span style="color:var(--purple)">${escHtml(r.system)}</span></td>
               <td><span class="rom-ext">${r.ext}</span></td>
               <td class="rom-size">${r.size_human}</td>
               <td>${r.issue === 'wrong_system' ? `<span class="issue-badge wrong">⚠</span>` : r.issue ? `<span class="issue-badge unknown">?</span>` : `<span class="issue-badge ok">✓</span>`}</td>
-              <td><button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${r.system}')">🗑</button></td>
+              <td><button class="btn btn-sm btn-danger" onclick="deleteRom('${escJs(r.name)}','${escJs(r.system)}')">🗑</button></td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -2680,7 +2680,7 @@ function renderBrowse() {
   filtered.slice(0, 4).forEach(([key]) => {
     if (!browseRomsCache[key]) {
       loadBrowseRoms(key).then(() => {
-        const rowEl = document.querySelector(`.browse-row[data-browse-system="${key}"]`);
+        const rowEl = document.querySelector(`.browse-row[data-browse-system="${CSS.escape(key)}"]`);
         if (rowEl) {
           const sys = state.systems[key];
           const tmpDiv = document.createElement('div');
@@ -2707,7 +2707,7 @@ function renderBrowse() {
           return renderBrowseRow(key, sys);
         }
         // Otherwise show a placeholder row
-        return `<div class="browse-row" data-browse-system="${key}" data-browse-pending="${key}">
+        return `<div class="browse-row" data-browse-system="${escHtml(key)}" data-browse-pending="${escHtml(key)}">
           <div class="browse-row-header">
             <h3>${escHtml(sys.name)}</h3>
             <span class="browse-count">${sys.ok_count || 0} games</span>
@@ -2736,18 +2736,18 @@ function renderBrowseRow(key, sys) {
   const hasMore = roms.length > CARD_LIMIT && !isExpanded;
 
   return `
-    <div class="browse-row" data-browse-system="${key}">
+    <div class="browse-row" data-browse-system="${escHtml(key)}">
       <div class="browse-row-header">
         <h3>${escHtml(sys.name)}</h3>
         <span class="browse-count">${roms.length} games</span>
       </div>
       <div class="browse-row-wrap">
-        <button class="browse-scroll-btn left" data-scroll-target="${key}">◀</button>
-        <div class="browse-row-scroll" id="browse-scroll-${key}">
+        <button class="browse-scroll-btn left" data-scroll-target="${escHtml(key)}">◀</button>
+        <div class="browse-row-scroll" id="browse-scroll-${escHtml(key)}">
           ${displayRoms.map(r => renderBrowseCard(r, key)).join('')}
-          ${hasMore ? `<div class="browse-show-more" onclick="state.browseExpandedSystems['${key}']=true;render()">+${roms.length - CARD_LIMIT} more</div>` : ''}
+          ${hasMore ? `<div class="browse-show-more" onclick="state.browseExpandedSystems['${escJs(key)}']=true;render()">+${roms.length - CARD_LIMIT} more</div>` : ''}
         </div>
-        <button class="browse-scroll-btn right" data-scroll-target="${key}">▶</button>
+        <button class="browse-scroll-btn right" data-scroll-target="${escHtml(key)}">▶</button>
       </div>
     </div>
   `;
@@ -2758,7 +2758,7 @@ function renderBrowseCard(rom, systemFolder) {
   const romData = JSON.stringify(rom).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
   const desc = rom.has_description ? '(has description)' : '';
   return `
-    <div class="browse-card" onclick='showEditModal(${JSON.stringify(rom).replace(/'/g,"&#39;")}, "${escJs(systemFolder)}")'>
+    <div class="browse-card" onclick='showEditModal(${escAttrJson(rom)}, "${escJs(systemFolder)}")'>
       <div class="browse-card-img">
         ${rom.has_cover && rom.cover_url
           ? `<img src="${escHtml(rom.cover_url)}" loading="lazy" alt="${escHtml(name)}">`
@@ -2881,7 +2881,7 @@ function renderModal() {
   return `<div class="modal-overlay" onclick="if(event.target===this){state.modal=null;render()}">
     <div class="modal">
       <h3>Move "${escHtml(m.name)}"</h3>
-      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:12px">Currently in: <strong>${m.system}</strong></p>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:12px">Currently in: <strong>${escHtml(m.system)}</strong></p>
       ${m.suggested_systems?.length ? `<p style="font-size:0.8rem;margin-bottom:8px;color:var(--yellow)">Suggested: ${m.suggested_systems.join(', ')}</p>` : ''}
       <select id="moveTarget">
         ${m.suggested_systems?.map(s => `<option value="${s}">${s} (suggested)</option>`).join('') || ''}
@@ -2889,7 +2889,7 @@ function renderModal() {
       </select>
       <div class="modal-actions">
         <button class="btn" onclick="state.modal=null;render()">Cancel</button>
-        <button class="btn btn-primary" onclick="moveRom('${escJs(m.name)}','${m.system}',document.getElementById('moveTarget').value)">Move</button>
+        <button class="btn btn-primary" onclick="moveRom('${escJs(m.name)}','${escJs(m.system)}',document.getElementById('moveTarget').value)">Move</button>
       </div>
     </div>
   </div>`;
@@ -2969,7 +2969,15 @@ function bindEvents() {
 
 // ─── Utils ───────────────────────────────────────────────────────────────────
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function escJs(s) { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
+// Escape for a JS string literal that lives inside an inline handler in an HTML attribute:
+// JS-escape first, then HTML-escape, so a `"` / `<` / `&` can never break out of the attribute.
+function escJs(s) {
+  const js = String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"')
+    .replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
+  return escHtml(js).replace(/'/g,'&#39;');
+}
+// JSON for a handler argument inside an HTML attribute (single- or double-quoted).
+function escAttrJson(o) { return escHtml(JSON.stringify(o)).replace(/'/g,'&#39;'); }
 
 // ─── Footer ──────────────────────────────────────────────────────────────────
 function renderFooter() {
