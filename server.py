@@ -63,7 +63,7 @@ logging.getLogger().addHandler(_log_ring)
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2026.07.2"
+APP_VERSION = "2026.07.3"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Mutable config dict — avoids global keyword in route handlers.
@@ -829,6 +829,33 @@ def _list_archive_contents(path: str, ext: str) -> list[str] | None:
         return None
 
 
+_CUE_FILE_RE = re.compile(r'^\s*FILE\s+(?:"([^"]+)"|(\S+))', re.IGNORECASE | re.MULTILINE)
+_GDI_LINE_RE = re.compile(r'^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(\S+))', re.MULTILINE)
+
+
+def _referenced_track_files(system_path: str, all_names) -> set:
+    """Lower-cased basenames referenced by any .cue (FILE "...") or .gdi in the folder.
+
+    A .bin is only 'missing its cue' if no sheet references it — multi-track Redump sets
+    ('Game (Track 1).bin' + one 'Game.cue') and Dreamcast .gdi sets are valid.
+    """
+    refs = set()
+    for n in all_names:
+        low = n.lower()
+        if not low.endswith((".cue", ".gdi")):
+            continue
+        try:
+            with open(os.path.join(system_path, n), "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(1 << 20)
+        except OSError:
+            continue
+        rx = _CUE_FILE_RE if low.endswith(".cue") else _GDI_LINE_RE
+        for m in rx.finditer(text):
+            ref = (m.group(1) or m.group(2) or "").replace("\\", "/")
+            refs.add(os.path.basename(ref).lower())
+    return refs
+
+
 def run_rom_diagnostics(
     system_key: str, system_path: str, roms: list[dict], all_names: set[str] | None = None
 ) -> list[dict]:
@@ -862,10 +889,9 @@ def run_rom_diagnostics(
     # --- Check 1: .bin without matching .cue (CD systems only) ---
     if is_cd_system:
         bin_files = [n for n in all_names if n.lower().endswith(".bin")]
-        cue_stems = {os.path.splitext(n)[0].lower() for n in all_names if n.lower().endswith(".cue")}
+        referenced = _referenced_track_files(system_path, all_names)
         for bf in bin_files:
-            stem = os.path.splitext(bf)[0].lower()
-            if stem not in cue_stems:
+            if bf.lower() not in referenced:
                 diag = {
                     "key": "missing_cue",
                     "file": bf,
@@ -2246,7 +2272,17 @@ def fix_generate_cue():
     cue_path = os.path.join(_roms_root(), system, cue_name)
     if os.path.exists(cue_path):
         return jsonify({"error": "already_exists", "detail": f"{cue_name} already exists"}), 409
-    cue_content = f'FILE "{filename}" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n'
+    if re.search(r"\(Track\s*\d+\)", filename, re.IGNORECASE):
+        return jsonify({"error": "multi_track", "detail": "This looks like one track of a multi-track set; it needs a multi-track cue (e.g. from redump.org)"}), 422
+    try:
+        with open(bin_path, "rb") as bf:
+            head = bf.read(16)
+    except OSError as e:
+        return jsonify({"error": "read_error", "detail": str(e)}), 500
+    if len(head) < 16 or head[:12] != b"\x00" + b"\xff" * 10 + b"\x00" or head[15] not in (1, 2):
+        return jsonify({"error": "not_data_track", "detail": "No CD sync header found - the file is audio or headerless, so a cue cannot be generated safely"}), 422
+    mode = "MODE1/2352" if head[15] == 1 else "MODE2/2352"
+    cue_content = f'FILE "{filename}" BINARY\n  TRACK 01 {mode}\n    INDEX 01 00:00:00\n'
     try:
         with open(cue_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(cue_content)

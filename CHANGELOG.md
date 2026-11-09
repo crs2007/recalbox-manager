@@ -2,6 +2,10 @@
 
 All notable changes to Recalbox Manager are documented here.
 
+## v2026.07.3 — 2026-11-09
+### Fixed
+- **`missing_cue` flagged valid multi-track Redump / GDI sets and `generate-cue` wrote wrong sheets** (#3) — detection now parses every `.cue` (`FILE "..."`) and `.gdi` in the folder and only flags a `.bin` no sheet references. `generate-cue` reads the CD sync header to pick `MODE1/2352` vs `MODE2/2352`, and refuses (422) audio/headerless files and `(Track N)` files.
+
 ## v2026.07.2 — 2026-11-09
 ### Fixed
 - **Duplicate detection grouped different files together, and the UI offered to trash them** (#2) — candidates are now keyed by `(size, quick_hash)` and confirmed with a full streamed blake2b hash, so ROM hacks/revisions that share a 64 KB header are no longer reported. New `POST /api/duplicates/trash` re-verifies `files_identical()` on the server and refuses (409) on mismatch; the Duplicates tab and Issues tab now use it.

@@ -42,6 +42,12 @@ write(path.join(BASE, 'roms', 'psx', 'GameWithCue.cue'),
   'FILE "GameWithCue.bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n');
 write(path.join(BASE, 'roms', 'psx', 'OrphanBin.bin'),     Buffer.from('\x00PSX_BIN_NO_CUE_ORPHAN'));
 
+// PSX: valid multi-track Redump set — one cue references both track bins (must produce NO findings)
+write(path.join(BASE, 'roms', 'psx', 'MultiTrack.cue'),
+  'FILE "MultiTrack (Track 1).bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\nFILE "MultiTrack (Track 2).bin" BINARY\n  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n');
+write(path.join(BASE, 'roms', 'psx', 'MultiTrack (Track 1).bin'), Buffer.from('\x00PSX_MULTI_TRACK_1'));
+write(path.join(BASE, 'roms', 'psx', 'MultiTrack (Track 2).bin'), Buffer.from('\x00PSX_MULTI_TRACK_2_AUDIO'));
+
 // NeoGeo: same content as Sonic.md → triggers duplicate detection
 write(path.join(BASE, 'roms', 'neogeo', 'DupGame.zip'),    SHARED);
 
